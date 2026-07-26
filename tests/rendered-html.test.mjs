@@ -68,6 +68,9 @@ test("serves pagination from cache and refreshes through the integrated catalogu
   assert.match(store, /crawlHomeSources/);
   assert.match(database, /product_daily_history/);
   assert.match(database, /PRIMARY KEY\(product_key, observed_date\)/);
+  assert.match(database, /isDailyCollectionDue/);
+  assert.match(api, /runDailyCollectionIfNeeded/);
+  assert.match(api, /DAILY_COLLECTION_CHECK_MS/);
   assert.match(page, /pageLoading/);
   assert.match(page, /controller\.abort\(\)/);
 });

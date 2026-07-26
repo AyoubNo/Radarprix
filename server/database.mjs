@@ -126,6 +126,17 @@ function dateInMorocco(isoValue) {
   return `${value.year}-${value.month}-${value.day}`;
 }
 
+export function isDailyCollectionDue(now = new Date()) {
+  const latest = database.prepare(`
+    SELECT finished_at AS finishedAt
+    FROM collection_runs
+    WHERE status IN ('done', 'partial') AND finished_at IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+  `).get();
+  return !latest?.finishedAt || dateInMorocco(latest.finishedAt) !== dateInMorocco(now.toISOString());
+}
+
 export function countProducts(universe) {
   return database.prepare(`
     SELECT COUNT(*) AS count FROM products_current WHERE universe = ? AND active = 1
@@ -286,4 +297,3 @@ export function getProductHistory({ productKey: key, site, productUrl, limit = 3
   `).all(resolvedKey, Math.min(1000, Math.max(1, Number(limit) || 365)));
   return { product, history };
 }
-

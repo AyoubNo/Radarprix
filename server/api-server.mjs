@@ -1,8 +1,9 @@
 import http from "node:http";
 import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from "./catalog-store.mjs";
-import { getDatabaseStats, getProductHistory } from "./database.mjs";
+import { getDatabaseStats, getProductHistory, isDailyCollectionDue } from "./database.mjs";
 
 const PORT = 3500;
+const DAILY_COLLECTION_CHECK_MS = 30 * 60 * 1000;
 const SOURCES = [
   { key: "pc", label: "PC & Gaming" },
   { key: "home", label: "Maison & Électroménager" },
@@ -324,6 +325,17 @@ async function getDealsForRequest() {
   return cache;
 }
 
+async function runDailyCollectionIfNeeded() {
+  if (!isDailyCollectionDue() || getCollectionProgress().running) return;
+  console.log("Collecte quotidienne PrixRadar lancée en arrière-plan.");
+  try {
+    await refreshDeals(true);
+    console.log("Collecte quotidienne PrixRadar terminée.");
+  } catch (error) {
+    console.error("Collecte quotidienne PrixRadar échouée:", error);
+  }
+}
+
 function filterDeals(deals, params) {
   const q = normalize(params.get("q") || "");
   const universe = params.get("universe") || "all";
@@ -451,4 +463,10 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`PrixRadar API: http://127.0.0.1:${PORT}`);
+  void refreshDeals(false).then(runDailyCollectionIfNeeded).catch((error) => {
+    console.error("Initialisation PrixRadar échouée:", error);
+  });
+  setInterval(() => {
+    void runDailyCollectionIfNeeded();
+  }, DAILY_COLLECTION_CHECK_MS).unref();
 });

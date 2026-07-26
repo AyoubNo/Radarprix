@@ -31,7 +31,12 @@ Au démarrage, RadarPrix charge immédiatement les snapshots inclus dans `data/`
 Lors du premier lancement sur une nouvelle machine, il crée automatiquement
 `data/radarprix.sqlite.db` et l’initialise depuis ces snapshots.
 
-Le bouton **Actualiser les données** exécute directement les collecteurs intégrés pour :
+Après le démarrage, l’API vérifie automatiquement si la collecte du jour a déjà
+été effectuée (date du Maroc). Si elle manque, elle lance la mise à jour en
+arrière-plan. Cette vérification est répétée toutes les 30 minutes tant que
+l’application reste ouverte.
+
+Le bouton **Actualiser les données** permet aussi d’exécuter directement les collecteurs intégrés pour :
 
 - TechSpace ;
 - UltraPC ;
@@ -47,6 +52,10 @@ Pour chaque produit réellement observé, la base enregistre un relevé quotidie
 avec le prix, l’ancien prix, la remise et la disponibilité. Plusieurs
 actualisations le même jour mettent à jour le relevé du jour au lieu de créer
 des doublons. La base reste locale et n’a besoin d’aucun serveur PostgreSQL.
+
+Pour garantir une capture chaque jour, PrixRadar doit rester lancé au moins le
+temps de la collecte quotidienne. S’il était arrêté, le relevé manquant est
+rattrapé automatiquement au prochain démarrage.
 
 Une connexion Internet est nécessaire pour actualiser les prix et afficher les images. Le catalogue local reste consultable sans nouvelle collecte.
 

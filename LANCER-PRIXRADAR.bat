@@ -33,7 +33,6 @@ echo La fermer arretera l'application.
 echo Adresse : http://localhost:3220/#classement
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-optional-sources.ps1"
 start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\open-browser.ps1"
 
 call npm run dev

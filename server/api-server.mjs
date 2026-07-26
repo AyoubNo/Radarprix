@@ -1,12 +1,29 @@
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from "./catalog-store.mjs";
+import { getDatabaseStats, getProductHistory } from "./database.mjs";
 
 const PORT = 3500;
-const CACHE_TTL_MS = 30 * 60 * 1000;
 const SOURCES = [
-  { key: "pc", label: "PC & Gaming", api: "http://127.0.0.1:3300" },
-  { key: "home", label: "Maison & Électroménager", api: "http://127.0.0.1:3400" },
+  { key: "pc", label: "PC & Gaming" },
+  { key: "home", label: "Maison & Électroménager" },
 ];
+
+const IMAGE_HOSTS = {
+  pc: [
+    "nextlevelpc.ma",
+    "cdn.shopify.com",
+    "ultrapc.ma",
+    "pcparadise.ma",
+    "techspace.ma",
+  ],
+  home: [
+    "websitephotosa.blob.core.windows.net",
+    "brandscorners.ma",
+    "prod2-media.electroplanet.ma",
+    "electrobousfiha.com",
+    "biougnach.ma",
+  ],
+};
 
 const PC_CATEGORY_NAMES = new Set([
   "alimentations", "boitiers", "bureaux gaming", "cables adaptateurs", "cartes graphiques", "cartes meres",
@@ -142,6 +159,7 @@ function toOffer(product, source) {
     originalPriceCents: Number(product.originalPriceCents) || null,
     availability: product.availability,
     productUrl: product.productUrl,
+    imageUrl: product.imageUrl || null,
     imageProxyUrl: product.imageUrl
       ? `/api/image?source=${source.key}&url=${encodeURIComponent(product.imageUrl)}`
       : null,
@@ -242,61 +260,55 @@ function scoreDeal(product, source) {
   };
 }
 
-async function fetchPage(source, page) {
-  const url = `${source.api}/api/products?sort=name_asc&limit=200&page=${page}`;
-  const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
-  if (!response.ok) throw new Error(`${source.label}: HTTP ${response.status}`);
-  return response.json();
-}
-
 async function fetchSource(source) {
-  let products;
-  let warning = null;
-  try {
-    const first = await fetchPage(source, 1);
-    const pages = Array.from({ length: Math.max(0, first.totalPages - 1) }, (_, index) => index + 2);
-    products = [...first.products];
-    for (let index = 0; index < pages.length; index += 6) {
-      const batch = await Promise.all(pages.slice(index, index + 6).map((page) => fetchPage(source, page)));
-      for (const result of batch) products.push(...result.products);
-    }
-  } catch (liveError) {
-    try {
-      const snapshot = JSON.parse(await readFile(new URL(`../data/${source.key}-products.json`, import.meta.url), "utf8"));
-      products = Array.isArray(snapshot.products) ? snapshot.products : [];
-      warning = `${source.label}: copie locale du ${new Date(snapshot.exportedAt).toLocaleDateString("fr-MA")} utilisée`;
-    } catch {
-      throw liveError;
-    }
-  }
+  const snapshot = await readSnapshot(source.key);
+  const products = snapshot.products;
   return {
     deals: products.filter((product) => product.onSale).map((product) => scoreDeal(product, source)).filter(Boolean),
     offers: products.map((product) => toOffer(product, source)).filter(Boolean),
-    warning,
+    exportedAt: snapshot.exportedAt,
   };
 }
 
 async function refreshDeals(force = false) {
-  if (!force && cache.deals.length && Date.now() - cache.fetchedAt < CACHE_TTL_MS) return cache;
+  if (!force && cache.deals.length) return cache;
   if (cache.loading) return cache.loading;
 
   cache.loading = (async () => {
+    const refreshWarnings = [];
+    if (force) {
+      try {
+        const refresh = await refreshIntegratedCatalog();
+        refreshWarnings.push(...refresh.warnings);
+      } catch (error) {
+        refreshWarnings.push(`Collecte intégrée interrompue: ${error?.message || "erreur inconnue"}`);
+      }
+    }
+
     const settled = await Promise.allSettled(SOURCES.map((source) => fetchSource(source)));
-    const warnings = [];
+    const warnings = [...refreshWarnings];
     const deals = [];
     const offers = [];
+    const snapshotTimes = [];
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
         deals.push(...result.value.deals);
         offers.push(...result.value.offers);
-        if (result.value.warning) warnings.push(result.value.warning);
+        const snapshotTime = Date.parse(result.value.exportedAt || "");
+        if (Number.isFinite(snapshotTime)) snapshotTimes.push(snapshotTime);
       }
       else warnings.push(`${SOURCES[index].label} indisponible: ${result.reason?.message || "erreur inconnue"}`);
     });
     if (!deals.length && cache.deals.length) return { ...cache, warnings };
     deals.sort((a, b) => b.score - a.score || b.savingsCents - a.savingsCents || b.discountPercent - a.discountPercent);
     const groupedDeals = attachComparisonsAndDedupe(deals, offers);
-    cache = { deals: groupedDeals, rawDealCount: deals.length, fetchedAt: Date.now(), warnings, loading: null };
+    cache = {
+      deals: groupedDeals,
+      rawDealCount: deals.length,
+      fetchedAt: snapshotTimes.length ? Math.max(...snapshotTimes) : Date.now(),
+      warnings: [...new Set(warnings)],
+      loading: null,
+    };
     return cache;
   })();
 
@@ -309,12 +321,6 @@ async function refreshDeals(force = false) {
 
 async function getDealsForRequest() {
   if (!cache.deals.length) return refreshDeals(false);
-  if (Date.now() - cache.fetchedAt >= CACHE_TTL_MS && !cache.loading) {
-    void refreshDeals(true).catch((error) => {
-      const message = `Actualisation en arrière-plan impossible: ${error?.message || "erreur inconnue"}`;
-      cache = { ...cache, warnings: [...new Set([...cache.warnings, message])], loading: null };
-    });
-  }
   return cache;
 }
 
@@ -354,12 +360,29 @@ async function proxyImage(url, response) {
   const imageUrl = url.searchParams.get("url");
   const source = SOURCES.find((item) => item.key === sourceKey);
   if (!source || !imageUrl || !/^https?:\/\//i.test(imageUrl)) return json(response, 400, { error: "Image invalide" });
-  const upstream = await fetch(`${source.api}/api/image?url=${encodeURIComponent(imageUrl)}`, {
+  const parsed = new URL(imageUrl);
+  const allowedHosts = IMAGE_HOSTS[source.key] || [];
+  const allowed = allowedHosts.some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`));
+  if (!allowed) return json(response, 403, { error: "Domaine d'image non autorisé" });
+
+  const upstream = await fetch(parsed, {
+    redirect: "follow",
+    headers: {
+      accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      referer: `${parsed.origin}/`,
+      "user-agent": "Mozilla/5.0 (compatible; PrixRadarMaroc/1.0)",
+    },
     signal: AbortSignal.timeout(20000),
   });
   if (!upstream.ok || !upstream.body) return json(response, upstream.status || 502, { error: "Image indisponible" });
+  const upstreamType = upstream.headers.get("content-type") || "";
+  const pathname = parsed.pathname.toLowerCase();
+  const inferredType = pathname.endsWith(".webp") ? "image/webp"
+    : pathname.endsWith(".png") ? "image/png"
+      : pathname.endsWith(".svg") ? "image/svg+xml"
+        : "image/jpeg";
   response.writeHead(200, {
-    "content-type": upstream.headers.get("content-type") || "image/jpeg",
+    "content-type": upstreamType.startsWith("image/") ? upstreamType : inferredType,
     "cache-control": "public, max-age=86400",
   });
   for await (const chunk of upstream.body) response.write(chunk);
@@ -374,7 +397,24 @@ const server = http.createServer(async (request, response) => {
       return response.end();
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return json(response, 200, { ok: true, cachedDeals: cache.deals.length, fetchedAt: cache.fetchedAt || null, sources: SOURCES });
+      return json(response, 200, {
+        ok: true,
+        cachedDeals: cache.deals.length,
+        fetchedAt: cache.fetchedAt || null,
+        sources: SOURCES,
+        collection: getCollectionProgress(),
+        database: getDatabaseStats(),
+      });
+    }
+    if (request.method === "GET" && url.pathname === "/api/history") {
+      const result = getProductHistory({
+        productKey: url.searchParams.get("productKey"),
+        site: url.searchParams.get("site"),
+        productUrl: url.searchParams.get("productUrl"),
+        limit: url.searchParams.get("limit"),
+      });
+      if (!result) return json(response, 404, { error: "Produit introuvable" });
+      return json(response, 200, result);
     }
     if (request.method === "GET" && url.pathname === "/api/image") return await proxyImage(url, response);
     if (request.method === "POST" && url.pathname === "/api/refresh") {

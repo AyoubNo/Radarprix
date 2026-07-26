@@ -9,7 +9,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node node_modules/vinext/dist/cli.js build",
     "start": "node scripts/dev.mjs",
-    "snapshot": "node scripts/export-snapshots.mjs",
+    "snapshot": "node --no-warnings scripts/export-snapshots.mjs",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

@@ -43,3 +43,8 @@ next-env.d.ts
 *.log
 *.pid
 tsconfig.tsbuildinfo
+/data/electroplanet-cookies.txt
+/data/*.json.tmp
+/data/radarprix.sqlite.db
+/data/radarprix.sqlite.db-shm
+/data/radarprix.sqlite.db-wal

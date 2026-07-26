@@ -3,7 +3,7 @@ import path from "node:path";
 
 const root = process.cwd();
 const children = [
-  spawn(process.execPath, [path.join(root, "server", "api-server.mjs")], {
+  spawn(process.execPath, ["--no-warnings", path.join(root, "server", "api-server.mjs")], {
     cwd: root,
     env: process.env,
     stdio: "inherit",

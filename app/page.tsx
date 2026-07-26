@@ -35,6 +35,7 @@ type Deal = {
   discountPercent: number;
   availability: "in_stock" | "out_of_stock" | "unknown";
   productUrl: string;
+  imageUrl: string | null;
   imageProxyUrl: string | null;
   score: number;
   quality: string;
@@ -54,6 +55,7 @@ type ComparisonOffer = {
   originalPriceCents: number | null;
   availability: "in_stock" | "out_of_stock" | "unknown";
   productUrl: string;
+  imageUrl: string | null;
   imageProxyUrl: string | null;
   confidence?: number;
 };
@@ -81,15 +83,54 @@ const emptyData: DealsResponse = {
 const money = new Intl.NumberFormat("fr-MA", { style: "currency", currency: "MAD", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("fr-MA");
 
+function ResilientImage({
+  product,
+  alt,
+  loading = "lazy",
+  fallbackSize = 34,
+  showFallbackLabel = false,
+}: {
+  product: Pick<Deal, "imageProxyUrl" | "imageUrl">;
+  alt: string;
+  loading?: "eager" | "lazy";
+  fallbackSize?: number;
+  showFallbackLabel?: boolean;
+}) {
+  const sources = [product.imageProxyUrl, product.imageUrl].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+  const [sourceIndex, setSourceIndex] = useState(0);
+
+  if (!sources.length || sourceIndex >= sources.length) {
+    return (
+      <span className="image-fallback">
+        <PackageSearch size={fallbackSize} />
+        {showFallbackLabel && <small>Image indisponible</small>}
+      </span>
+    );
+  }
+
+  return (
+    <img
+      key={sources[sourceIndex]}
+      src={sources[sourceIndex]}
+      alt={alt}
+      loading={loading}
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onError={() => setSourceIndex((current) => current + 1)}
+    />
+  );
+}
+
 function DealImage({ deal, onOpen, eager = false }: { deal: Deal; onOpen: () => void; eager?: boolean }) {
-  const [failed, setFailed] = useState(false);
   return (
     <button className="product-image" onClick={onOpen} aria-label={`Agrandir l’image de ${deal.name}`}>
-      {deal.imageProxyUrl && !failed ? (
-        <img src={deal.imageProxyUrl} alt={deal.name} loading={eager ? "eager" : "lazy"} onError={() => setFailed(true)} />
-      ) : (
-        <span className="image-fallback"><PackageSearch size={34} /><small>Image indisponible</small></span>
-      )}
+      <ResilientImage
+        key={`${deal.imageProxyUrl}|${deal.imageUrl}`}
+        product={deal}
+        alt={deal.name}
+        loading={eager ? "eager" : "lazy"}
+        showFallbackLabel
+      />
     </button>
   );
 }
@@ -148,7 +189,9 @@ function ComparisonModal({ deal, onClose }: { deal: Deal; onClose: () => void })
       <div className="compare-modal" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={`Comparer ${deal.name}`}>
         <button className="modal-close" onClick={onClose} title="Fermer"><X size={20} /></button>
         <div className="compare-heading">
-          <div className="compare-product-image">{deal.imageProxyUrl ? <img src={deal.imageProxyUrl} alt="" /> : <PackageSearch size={28} />}</div>
+          <div className="compare-product-image">
+            <ResilientImage key={`${deal.imageProxyUrl}|${deal.imageUrl}`} product={deal} alt="" fallbackSize={28} />
+          </div>
           <div><p><GitCompareArrows size={15} /> Comparaison multi-magasins</p><h3>{deal.name}</h3><span>{deal.merchantCount} enseignes détectées pour ce même produit</span></div>
         </div>
         <div className="compare-list">
@@ -195,7 +238,6 @@ export default function Home() {
     const controller = new AbortController();
     if (hasLoaded.current) setPageLoading(true);
     else setLoading(true);
-    setError("");
     const [minPrice, maxPrice] = budget.split(":");
     const params = new URLSearchParams({ q: query, universe, site, category, availability, minPrice, maxPrice, minDiscount, sort, page: String(page), limit: "24" });
     fetch(`/api/deals?${params}`, { signal: controller.signal })
@@ -205,6 +247,7 @@ export default function Home() {
       })
       .then((payload) => {
         if (!active) return;
+        setError("");
         setData(payload);
         hasLoaded.current = true;
       })
@@ -361,7 +404,9 @@ export default function Home() {
         <div className="modal-backdrop" onMouseDown={() => setSelected(null)}>
           <div className="image-modal" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={selected.name}>
             <button className="modal-close" onClick={() => setSelected(null)} title="Fermer"><X size={20} /></button>
-            <div className="modal-image">{selected.imageProxyUrl ? <img src={selected.imageProxyUrl} alt={selected.name} /> : <PackageSearch size={50} />}</div>
+            <div className="modal-image">
+              <ResilientImage key={`${selected.imageProxyUrl}|${selected.imageUrl}`} product={selected} alt={selected.name} loading="eager" fallbackSize={50} />
+            </div>
             <div className="modal-copy"><span>{selected.site} · {selected.category}</span><h3>{selected.name}</h3><div><b>{money.format(selected.priceCents / 100)}</b><del>{money.format(selected.originalPriceCents / 100)}</del><em>−{Math.round(selected.discountPercent)}%</em></div><a href={selected.productUrl} target="_blank" rel="noreferrer">Voir l’offre chez {selected.site} <ExternalLink size={16} /></a></div>
           </div>
         </div>

@@ -54,13 +54,20 @@ test("classifies every product by category instead of by source store", async ()
   assert.match(api, /\[deal, \.\.\.comparisons\]\.some/);
 });
 
-test("serves pagination from cache while refreshing stale data in the background", async () => {
+test("serves pagination from cache and refreshes through the integrated catalogue", async () => {
   const api = await readFile(new URL("../server/api-server.mjs", import.meta.url), "utf8");
+  const store = await readFile(new URL("../server/catalog-store.mjs", import.meta.url), "utf8");
+  const database = await readFile(new URL("../server/database.mjs", import.meta.url), "utf8");
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(api, /async function getDealsForRequest/);
-  assert.match(api, /void refreshDeals\(true\)/);
+  assert.match(api, /refreshIntegratedCatalog/);
   assert.match(api, /const state = await getDealsForRequest\(\)/);
+  assert.doesNotMatch(api, /127\.0\.0\.1:(3300|3400)/);
+  assert.match(store, /crawlPcSources/);
+  assert.match(store, /crawlHomeSources/);
+  assert.match(database, /product_daily_history/);
+  assert.match(database, /PRIMARY KEY\(product_key, observed_date\)/);
   assert.match(page, /pageLoading/);
   assert.match(page, /controller\.abort\(\)/);
 });

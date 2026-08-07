@@ -74,3 +74,17 @@ test("serves pagination from cache and refreshes through the integrated catalogu
   assert.match(page, /pageLoading/);
   assert.match(page, /controller\.abort\(\)/);
 });
+
+test("uses Chromium for Electroplanet and writes the collection text report", async () => {
+  const collector = await readFile(new URL("../server/collectors/home.mjs", import.meta.url), "utf8");
+  const store = await readFile(new URL("../server/catalog-store.mjs", import.meta.url), "utf8");
+  const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+
+  assert.match(collector, /puppeteer-core/);
+  assert.match(collector, /crawlElectroplanetBrowser/);
+  assert.match(collector, /disable-blink-features=AutomationControlled/);
+  assert.match(collector, /crawlElectroplanetHttp/);
+  assert.match(store, /derniere-collecte\.txt/);
+  assert.match(store, /writeCollectionReport/);
+  assert.match(dockerfile, /chromium/);
+});

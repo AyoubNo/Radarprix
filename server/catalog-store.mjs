@@ -19,6 +19,7 @@ const snapshotFiles = {
   pc: path.join(dataDirectory, "pc-products.json"),
   home: path.join(dataDirectory, "home-products.json"),
 };
+const collectionReportFile = path.join(dataDirectory, "derniere-collecte.txt");
 
 const PC_CATEGORY_RULES = [
   ["Sacs & protections", /(sac a dos|sacoche|backpack|bagpack|cartable|laptop bag|housse|sleeve|mallette)/],
@@ -159,6 +160,59 @@ async function writeSnapshot(universe, products, options = {}) {
   return snapshot;
 }
 
+async function writeCollectionReport({
+  startedAt,
+  finishedAt,
+  status,
+  productsObserved,
+  productsStored,
+  results = [],
+  warnings = [],
+  error = null,
+}) {
+  await mkdir(dataDirectory, { recursive: true });
+  const statusLabel = { done: "TERMINEE", partial: "PARTIELLE", error: "ERREUR" }[status] || status;
+  const lines = [
+    "PrixRadar Maroc - Rapport de collecte",
+    "========================================",
+    `Derniere mise a jour (UTC) : ${finishedAt}`,
+    `Debut de la collecte (UTC) : ${startedAt}`,
+    `Statut : ${statusLabel}`,
+    `Produits recuperes pendant cette collecte : ${productsObserved}`,
+    `Produits actuellement enregistres : ${productsStored}`,
+    "",
+    "Collecteurs :",
+  ];
+
+  for (const result of results) {
+    const site = result.source?.site || result.site || "Source inconnue";
+    if (result.ok === false || result.status === "error") {
+      lines.push(`- ${site} | ERREUR | 0 produit recupere | ${result.error || "erreur inconnue"}`);
+      continue;
+    }
+    const count = Array.isArray(result.products) ? result.products.length : Number(result.products || 0);
+    const pages = Number(result.pages || result.totalPages || result.page || 0);
+    const reported = Number(result.reported || count);
+    const pageLabel = pages ? ` | ${pages} page(s)` : "";
+    const reportedLabel = reported !== count ? ` | ${reported} annonce(s)` : "";
+    lines.push(`- ${site} | OK | ${count} produit(s) recupere(s)${pageLabel}${reportedLabel}`);
+  }
+
+  if (warnings.length) {
+    lines.push("", "Avertissements :", ...warnings.map((warning) => `- ${warning}`));
+  }
+  if (error) lines.push("", `Erreur generale : ${error}`);
+
+  const temporary = `${collectionReportFile}.tmp`;
+  await writeFile(temporary, `${lines.join("\n")}\n`, "utf8");
+  try {
+    await rename(temporary, collectionReportFile);
+  } catch {
+    await rm(collectionReportFile, { force: true });
+    await rename(temporary, collectionReportFile);
+  }
+}
+
 let activeRefresh = null;
 let collectionProgress = { running: false, startedAt: null, sites: {} };
 
@@ -215,11 +269,22 @@ export function refreshIntegratedCatalog() {
     try {
       const pc = await refreshUniverse("pc", crawlPcSources);
       const home = await refreshUniverse("home", crawlHomeSources);
+      const results = [...pc.results, ...home.results];
       const warnings = [...pc.warnings, ...home.warnings];
-      const productsObserved = [...pc.results, ...home.results]
+      const productsObserved = results
         .filter((result) => result.ok)
         .reduce((total, result) => total + result.products.length, 0);
       const status = warnings.length ? "partial" : "done";
+      const finishedAt = new Date().toISOString();
+      await writeCollectionReport({
+        startedAt: collectionProgress.startedAt,
+        finishedAt,
+        status,
+        productsObserved,
+        productsStored: pc.products.length + home.products.length,
+        results,
+        warnings,
+      });
       finishCollectionRun(run.id, status, {
         productsObserved,
         warnings,
@@ -228,20 +293,38 @@ export function refreshIntegratedCatalog() {
       collectionProgress = {
         ...collectionProgress,
         running: false,
-        finishedAt: new Date().toISOString(),
+        finishedAt,
         warnings,
       };
       return { snapshots: { pc, home }, warnings };
     } catch (error) {
+      const finishedAt = new Date().toISOString();
+      const message = error?.message || String(error);
+      const siteResults = Object.values(collectionProgress.sites);
+      try {
+        await writeCollectionReport({
+          startedAt: collectionProgress.startedAt,
+          finishedAt,
+          status: "error",
+          productsObserved: siteResults
+            .filter((state) => state.status === "done")
+            .reduce((total, state) => total + Number(state.products || 0), 0),
+          productsStored: countProducts("pc") + countProducts("home"),
+          results: siteResults,
+          error: message,
+        });
+      } catch {
+        // L'erreur initiale reste prioritaire si le rapport ne peut pas être écrit.
+      }
       finishCollectionRun(run.id, "error", {
-        error: error?.message || String(error),
+        error: message,
         sites: collectionProgress.sites,
       });
       collectionProgress = {
         ...collectionProgress,
         running: false,
-        finishedAt: new Date().toISOString(),
-        error: error?.message || String(error),
+        finishedAt,
+        error: message,
       };
       throw error;
     }

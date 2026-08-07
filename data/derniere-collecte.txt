@@ -1,0 +1,16 @@
+PrixRadar Maroc - Rapport de collecte
+========================================
+Derniere mise a jour (UTC) : 2026-08-07T22:35:03.557Z
+Debut de la collecte (UTC) : 2026-08-07T22:20:21.791Z
+Statut : TERMINEE
+Produits recuperes pendant cette collecte : 34694
+Produits actuellement enregistres : 34585
+
+Collecteurs :
+- TechSpace | OK | 6670 produit(s) recupere(s) | 27 page(s)
+- UltraPC | OK | 6952 produit(s) recupere(s) | 218 page(s)
+- NextLevelPC | OK | 6802 produit(s) recupere(s) | 341 page(s)
+- Electroplanet | OK | 2385 produit(s) recupere(s) | 50 page(s) | 2513 annonce(s)
+- Electro Bousfiha | OK | 1431 produit(s) recupere(s) | 96 page(s)
+- Biougnach | OK | 2806 produit(s) recupere(s) | 29 page(s)
+- Brands Corners | OK | 7648 produit(s) recupere(s) | 77 page(s)

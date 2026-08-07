@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import puppeteer from "puppeteer-core";
 import { promisify } from "node:util";
 import {
   USER_AGENT,
@@ -17,6 +18,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 const ELECTROPLANET_COOKIE_JAR = path.join(process.cwd(), "data", "electroplanet-cookies.txt");
+const ELECTROPLANET_BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 
 export const HOME_SOURCES = [
   { site: "Electroplanet", type: "electroplanet", url: "https://www.electroplanet.ma" },
@@ -218,7 +221,7 @@ function parseElectroplanetPage(html, pageNumber) {
   return { products, reported };
 }
 
-async function crawlElectroplanet(source, onProgress) {
+async function crawlElectroplanetHttp(source, onProgress) {
   const pageUrl = (page) => `${source.url}/recherche?q=%2A&product_list_limit=60&p=${page}`;
   const first = parseElectroplanetPage(await fetchSourceText(pageUrl(1)), 1);
   if (!first.products.length) throw new Error("Le catalogue Electroplanet n'a pas pu être analysé.");
@@ -238,6 +241,122 @@ async function crawlElectroplanet(source, onProgress) {
     throw new Error(`Collecte Electroplanet incomplète (${products.length}/${first.reported}).`);
   }
   return { products, pages: totalPages, reported: first.reported || products.length };
+}
+
+async function findChromiumExecutable() {
+  const candidates = [
+    process.env.CHROMIUM_PATH,
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Essaie le chemin suivant; le collecteur HTTP reste disponible en repli.
+    }
+  }
+  throw new Error("Chromium est introuvable (définir CHROMIUM_PATH si nécessaire).");
+}
+
+async function readElectroplanetBrowserPage(page, url, pageNumber) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90_000 });
+      await page.waitForSelector("li.product-item", { timeout: 35_000 });
+      const parsed = parseElectroplanetPage(await page.content(), pageNumber);
+      if (!parsed.products.length) throw new Error("page catalogue vide");
+      return parsed;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await sleep(2500 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+async function crawlElectroplanetBrowser(source, onProgress) {
+  const executablePath = await findChromiumExecutable();
+  const browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    protocolTimeout: 120_000,
+    args: [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-blink-features=AutomationControlled",
+      "--window-size=1920,1080",
+      "--lang=fr-FR",
+      `--user-agent=${ELECTROPLANET_BROWSER_USER_AGENT}`,
+    ],
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setExtraHTTPHeaders({ "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.7" });
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      if (["font", "image", "media", "stylesheet"].includes(request.resourceType())) {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+
+    const pageUrl = (pageNumber, direction) => (
+      `${source.url}/recherche?q=%2A&product_list_limit=60&product_list_order=price&product_list_dir=${direction}&p=${pageNumber}`
+    );
+    const first = await readElectroplanetBrowserPage(page, pageUrl(1, "asc"), 1);
+    const reportedPages = Math.max(1, Math.ceil((first.reported || first.products.length) / first.products.length));
+    // Magento/Elasticsearch refuse les résultats au-delà de la fenêtre de 2 400 articles.
+    // Les premières pages triées dans les deux sens couvrent alors les deux extrémités du catalogue.
+    const ascendingPages = Math.min(40, reportedPages);
+    const descendingPages = reportedPages > ascendingPages ? Math.min(10, reportedPages) : 0;
+    const totalPages = ascendingPages + descendingPages;
+    const byUrl = new Map(first.products.map((product) => [product.productUrl, product]));
+    onProgress?.({ page: 1, totalPages, products: byUrl.size });
+
+    for (let pageNumber = 2; pageNumber <= ascendingPages; pageNumber += 1) {
+      const result = await readElectroplanetBrowserPage(page, pageUrl(pageNumber, "asc"), pageNumber);
+      for (const product of result.products) byUrl.set(product.productUrl, product);
+      onProgress?.({ page: pageNumber, totalPages, products: byUrl.size });
+      await sleep(650);
+    }
+
+    for (let pageNumber = 1; pageNumber <= descendingPages; pageNumber += 1) {
+      const progressPage = ascendingPages + pageNumber;
+      const result = await readElectroplanetBrowserPage(
+        page,
+        pageUrl(pageNumber, "desc"),
+        progressPage,
+      );
+      for (const product of result.products) byUrl.set(product.productUrl, product);
+      onProgress?.({ page: progressPage, totalPages, products: byUrl.size });
+      await sleep(650);
+    }
+
+    const products = [...byUrl.values()];
+    if (first.reported && products.length < first.reported * 0.90) {
+      throw new Error(`Collecte Electroplanet incomplète (${products.length}/${first.reported}).`);
+    }
+    return { products, pages: totalPages, reported: first.reported || products.length };
+  } finally {
+    await browser.close();
+  }
+}
+
+async function crawlElectroplanet(source, onProgress) {
+  try {
+    return await crawlElectroplanetBrowser(source, onProgress);
+  } catch (browserError) {
+    const detail = browserError instanceof Error ? browserError.message : String(browserError);
+    console.warn(`[Electroplanet] Navigation Chromium indisponible: ${detail}. Repli HTTP.`);
+    return crawlElectroplanetHttp(source, onProgress);
+  }
 }
 
 function wooPriceToCents(raw, minorUnit = 0) {

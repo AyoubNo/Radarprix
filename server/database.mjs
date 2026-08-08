@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { buildPriceStats, normalizeHistoryWindowDays } from "./price-intelligence.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataDirectory = path.join(root, "data");
@@ -264,7 +265,7 @@ export function getDatabaseStats() {
   return { ...current, ...history, databasePath };
 }
 
-export function getProductHistory({ productKey: key, site, productUrl, limit = 365 }) {
+function resolveProductKey({ productKey: key, site, productUrl }) {
   let resolvedKey = key;
   if (!resolvedKey && site && productUrl) {
     resolvedKey = database.prepare(`
@@ -273,6 +274,11 @@ export function getProductHistory({ productKey: key, site, productUrl, limit = 3
       WHERE site = ? AND product_url = ?
     `).get(site, productUrl)?.productKey;
   }
+  return resolvedKey || null;
+}
+
+export function getProductHistory({ productKey: key, site, productUrl, limit = 365, days } = {}) {
+  const resolvedKey = resolveProductKey({ productKey: key, site, productUrl });
   if (!resolvedKey) return null;
 
   const product = database.prepare(`
@@ -283,6 +289,51 @@ export function getProductHistory({ productKey: key, site, productUrl, limit = 3
   `).get(resolvedKey);
   if (!product) return null;
 
+  const windowClause = days === null || days === undefined || days === ""
+    ? ""
+    : `AND observed_date >= date(
+         (SELECT MAX(observed_date) FROM product_daily_history WHERE product_key = ?),
+         ?
+       )`;
+  const statement = database.prepare(`
+    SELECT observed_date AS observedDate,
+           price_cents AS priceCents,
+           original_price_cents AS originalPriceCents,
+           discount_percent AS discountPercent,
+           availability,
+           observed_at AS observedAt
+    FROM product_daily_history
+    WHERE product_key = ?
+    ${windowClause}
+    ORDER BY observed_date DESC
+    LIMIT ?
+  `);
+  const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 365));
+  const history = windowClause
+    ? statement.all(
+      resolvedKey,
+      resolvedKey,
+      `-${normalizeHistoryWindowDays(days) - 1} days`,
+      safeLimit,
+    )
+    : statement.all(resolvedKey, safeLimit);
+  return { product, history };
+}
+
+export function getProductPriceStats({ productKey: key, site, productUrl, days = 90 } = {}) {
+  const resolvedKey = resolveProductKey({ productKey: key, site, productUrl });
+  if (!resolvedKey) return null;
+
+  const product = database.prepare(`
+    SELECT price_cents AS priceCents,
+           original_price_cents AS originalPriceCents,
+           discount_percent AS discountPercent
+    FROM products_current
+    WHERE product_key = ?
+  `).get(resolvedKey);
+  if (!product) return null;
+
+  const windowDays = normalizeHistoryWindowDays(days);
   const history = database.prepare(`
     SELECT observed_date AS observedDate,
            price_cents AS priceCents,
@@ -292,8 +343,18 @@ export function getProductHistory({ productKey: key, site, productUrl, limit = 3
            observed_at AS observedAt
     FROM product_daily_history
     WHERE product_key = ?
-    ORDER BY observed_date DESC
-    LIMIT ?
-  `).all(resolvedKey, Math.min(1000, Math.max(1, Number(limit) || 365)));
-  return { product, history };
+      AND observed_date >= date(
+        (SELECT MAX(observed_date) FROM product_daily_history WHERE product_key = ?),
+        ?
+      )
+    ORDER BY observed_date ASC
+  `).all(resolvedKey, resolvedKey, `-${windowDays - 1} days`);
+
+  return buildPriceStats({
+    history,
+    windowDays,
+    currentPriceCents: product.priceCents,
+    claimedOriginalPriceCents: product.originalPriceCents,
+    claimedDiscountPercent: product.discountPercent,
+  });
 }

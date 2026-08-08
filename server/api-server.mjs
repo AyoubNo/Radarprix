@@ -1,6 +1,11 @@
 import http from "node:http";
 import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from "./catalog-store.mjs";
-import { getDatabaseStats, getProductHistory, isDailyCollectionDue } from "./database.mjs";
+import {
+  getDatabaseStats,
+  getProductHistory,
+  getProductPriceStats,
+  isDailyCollectionDue,
+} from "./database.mjs";
 
 const PORT = 3500;
 const DAILY_COLLECTION_CHECK_MS = 30 * 60 * 1000;
@@ -419,14 +424,20 @@ const server = http.createServer(async (request, response) => {
       });
     }
     if (request.method === "GET" && url.pathname === "/api/history") {
-      const result = getProductHistory({
+      const lookup = {
         productKey: url.searchParams.get("productKey"),
         site: url.searchParams.get("site"),
         productUrl: url.searchParams.get("productUrl"),
+      };
+      const days = url.searchParams.get("days");
+      const result = getProductHistory({
+        ...lookup,
         limit: url.searchParams.get("limit"),
+        days,
       });
       if (!result) return json(response, 404, { error: "Produit introuvable" });
-      return json(response, 200, result);
+      const stats = getProductPriceStats({ ...lookup, days });
+      return json(response, 200, { product: result.product, stats, history: result.history });
     }
     if (request.method === "GET" && url.pathname === "/api/image") return await proxyImage(url, response);
     if (request.method === "POST" && url.pathname === "/api/refresh") {

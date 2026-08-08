@@ -88,3 +88,13 @@ test("uses Chromium for Electroplanet and writes the collection text report", as
   assert.match(store, /writeCollectionReport/);
   assert.match(dockerfile, /chromium/);
 });
+
+test("returns to the ranking header after pagination", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /pendingRankingScroll\.current = true/);
+  assert.match(page, /data\.page !== page/);
+  assert.match(page, /rankingRef\.current\?\.scrollIntoView/);
+  assert.match(page, /behavior: "smooth", block: "start"/);
+  assert.doesNotMatch(page, /scrollTo\(\{ top: 560/);
+});

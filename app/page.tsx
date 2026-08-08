@@ -232,6 +232,8 @@ export default function Home() {
   const [selected, setSelected] = useState<Deal | null>(null);
   const [comparing, setComparing] = useState<Deal | null>(null);
   const hasLoaded = useRef(false);
+  const rankingRef = useRef<HTMLElement>(null);
+  const pendingRankingScroll = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -252,7 +254,10 @@ export default function Home() {
         hasLoaded.current = true;
       })
       .catch((reason) => {
-        if (active && reason?.name !== "AbortError") setError(reason?.message || "Impossible de charger les affaires.");
+        if (active && reason?.name !== "AbortError") {
+          pendingRankingScroll.current = false;
+          setError(reason?.message || "Impossible de charger les affaires.");
+        }
       })
       .finally(() => {
         if (active) {
@@ -262,6 +267,15 @@ export default function Home() {
       });
     return () => { active = false; controller.abort(); };
   }, [query, universe, site, category, availability, budget, minDiscount, sort, page, reloadKey]);
+
+  useEffect(() => {
+    if (!pendingRankingScroll.current || data.page !== page) return;
+    pendingRankingScroll.current = false;
+    const frame = requestAnimationFrame(() => {
+      rankingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [data.page, page]);
 
   const topDeals = useMemo(() => data.page === 1 && sort === "score_desc" ? data.deals.slice(0, 3) : [], [data.deals, data.page, sort]);
   const resultDeals = topDeals.length ? data.deals.slice(3) : data.deals;
@@ -276,6 +290,12 @@ export default function Home() {
     setSite("all");
     setCategory("all");
     setPage(1);
+  }
+
+  function changePage(nextPage: number) {
+    if (nextPage === page) return;
+    pendingRankingScroll.current = true;
+    setPage(nextPage);
   }
 
   async function refresh() {
@@ -336,7 +356,7 @@ export default function Home() {
         <div><Sparkles size={19} /><span>Jusqu’à <b>{money.format(data.stats.maxSavings / 100)}</b> d’économie</span></div>
       </section>
 
-      <section className="workspace" id="classement">
+      <section className="workspace" id="classement" ref={rankingRef}>
         <div className="section-heading">
           <div><p className="section-kicker">Classement en direct</p><h2>{universe === "pc" ? "Bonnes affaires PC & Gaming" : universe === "home" ? "Bonnes affaires Maison & Électroménager" : "Les meilleures affaires du moment"}</h2></div>
           <p className="last-update">Mise à jour {data.stats.updatedAt ? new Date(data.stats.updatedAt).toLocaleString("fr-MA", { dateStyle: "medium", timeStyle: "short" }) : "en cours…"}</p>
@@ -389,9 +409,9 @@ export default function Home() {
 
         {data.totalPages > 1 && !loading && (
           <div className="pagination">
-            <button title="Page précédente" disabled={page <= 1 || pageLoading} onClick={() => { setPage((value) => Math.max(1, value - 1)); scrollTo({ top: 560, behavior: "smooth" }); }}><ChevronLeft size={18} /></button>
+            <button title="Page précédente" aria-label="Page précédente" disabled={page <= 1 || pageLoading} onClick={() => changePage(Math.max(1, page - 1))}><ChevronLeft size={18} /></button>
             <span>{pageLoading ? <><RefreshCw size={14} className="spin" /> Chargement rapide…</> : <>Page <b>{data.page}</b> sur {data.totalPages}</>}</span>
-            <button title="Page suivante" disabled={page >= data.totalPages || pageLoading} onClick={() => { setPage((value) => Math.min(data.totalPages, value + 1)); scrollTo({ top: 560, behavior: "smooth" }); }}><ChevronRight size={18} /></button>
+            <button title="Page suivante" aria-label="Page suivante" disabled={page >= data.totalPages || pageLoading} onClick={() => changePage(Math.min(data.totalPages, page + 1))}><ChevronRight size={18} /></button>
           </div>
         )}
 

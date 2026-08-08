@@ -1,0 +1,24 @@
+services:
+  radarprix:
+    build:
+      context: .
+    image: radarprix-local
+    container_name: radarprix
+    init: true
+    restart: unless-stopped
+    environment:
+      PRIXRADAR_HOST: 0.0.0.0
+    ports:
+      - "3220:3220"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3500/api/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s

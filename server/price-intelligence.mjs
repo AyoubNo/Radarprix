@@ -4,8 +4,9 @@ export const MAX_HISTORY_WINDOW_DAYS = 365;
 export const PRICE_INTELLIGENCE_THRESHOLDS = Object.freeze({
   minimumObservations: 7,
   highConfidenceObservations: 30,
-  suspiciousClaimedDiscountPercent: 15,
-  suspiciousDiscountGapPoints: 10,
+  minimumMeaningfulClaimedDiscountPercent: 0,
+  exaggeratedClaimedDiscountPercent: 15,
+  exaggeratedClaimGapPoints: 10,
   exceptionalHistoricalDiscountPercent: 15,
   exceptionalLowestDistancePercent: 1,
   goodHistoricalDiscountPercent: 7,
@@ -13,18 +14,38 @@ export const PRICE_INTELLIGENCE_THRESHOLDS = Object.freeze({
   expensiveHistoricalDiscountPercent: -5,
 });
 
-const VERDICTS = Object.freeze({
+export const HISTORY_FRESHNESS_THRESHOLDS = Object.freeze({
+  freshHours: 24,
+  staleHours: 72,
+});
+
+const DEAL_VERDICTS = Object.freeze({
   insufficient_history: Object.freeze({
     code: "insufficient_history",
     label: "Pas encore assez de données",
+  }),
+  stale_history: Object.freeze({
+    code: "insufficient_history",
+    label: "Données trop anciennes pour confirmer",
   }),
   exceptional: Object.freeze({ code: "exceptional", label: "Prix exceptionnel" }),
   good: Object.freeze({ code: "good", label: "Bonne affaire" }),
   normal: Object.freeze({ code: "normal", label: "Prix habituel" }),
   expensive: Object.freeze({ code: "expensive", label: "Plus cher que d'habitude" }),
-  suspicious_promotion: Object.freeze({
-    code: "suspicious_promotion",
-    label: "Remise affichée peu représentative du prix habituel",
+});
+
+const CLAIM_ASSESSMENTS = Object.freeze({
+  unknown: Object.freeze({
+    code: "unknown",
+    label: "Pas assez de données pour vérifier la remise affichée",
+  }),
+  representative: Object.freeze({
+    code: "representative",
+    label: "Remise cohérente avec l'historique",
+  }),
+  exaggerated: Object.freeze({
+    code: "exaggerated",
+    label: "Remise affichée supérieure à la baisse observée",
   }),
 });
 
@@ -87,30 +108,51 @@ export function historyConfidence(observations) {
   return "high";
 }
 
-export function priceVerdict({
+export function historyFreshness(lastObservedAt, now = new Date()) {
+  if (!lastObservedAt) {
+    return { status: "unknown", ageHours: null, lastObservedAt: null };
+  }
+  const observedTime = new Date(lastObservedAt).getTime();
+  const nowTime = new Date(now).getTime();
+  if (!Number.isFinite(observedTime) || !Number.isFinite(nowTime)) {
+    return { status: "unknown", ageHours: null, lastObservedAt: null };
+  }
+
+  const ageHoursValue = Math.max(0, (nowTime - observedTime) / (60 * 60 * 1000));
+  const ageHours = roundPercent(ageHoursValue);
+  const thresholds = HISTORY_FRESHNESS_THRESHOLDS;
+  const status = ageHoursValue <= thresholds.freshHours
+    ? "fresh"
+    : ageHoursValue <= thresholds.staleHours
+      ? "stale"
+      : "very_stale";
+  return {
+    status,
+    ageHours,
+    lastObservedAt: typeof lastObservedAt === "string"
+      ? lastObservedAt
+      : new Date(observedTime).toISOString(),
+  };
+}
+
+export function buildDealVerdict({
   observationsCount,
-  claimedDiscountPercent,
   historicalDiscountPercent,
   distanceFromLowestPercent,
   currentPriceCents,
   previousLowestPriceCents,
+  freshness,
 }) {
   const thresholds = PRICE_INTELLIGENCE_THRESHOLDS;
   if (historyConfidence(observationsCount) === "insufficient") {
-    return { ...VERDICTS.insufficient_history };
+    return { ...DEAL_VERDICTS.insufficient_history };
+  }
+  if (freshness?.status === "very_stale") {
+    return { ...DEAL_VERDICTS.stale_history };
   }
 
-  const claimedDiscount = finiteNumber(claimedDiscountPercent);
   const historicalDiscount = finiteNumber(historicalDiscountPercent);
   const distanceFromLowest = finiteNumber(distanceFromLowestPercent);
-  if (
-    claimedDiscount !== null
-    && claimedDiscount >= thresholds.suspiciousClaimedDiscountPercent
-    && claimedDiscount - Math.max(0, historicalDiscount || 0) >= thresholds.suspiciousDiscountGapPoints
-  ) {
-    return { ...VERDICTS.suspicious_promotion };
-  }
-
   const currentPrice = integerPrice(currentPriceCents);
   const previousLowest = integerPrice(previousLowestPriceCents);
   const isMeaningfullyAtLowest = historicalDiscount !== null
@@ -124,7 +166,7 @@ export function priceVerdict({
     (historicalDiscount !== null && historicalDiscount >= thresholds.exceptionalHistoricalDiscountPercent)
     || isMeaningfullyAtLowest
   ) {
-    return { ...VERDICTS.exceptional };
+    return { ...DEAL_VERDICTS.exceptional };
   }
 
   const isNearLowest = historicalDiscount !== null
@@ -135,14 +177,42 @@ export function priceVerdict({
     (historicalDiscount !== null && historicalDiscount >= thresholds.goodHistoricalDiscountPercent)
     || isNearLowest
   ) {
-    return { ...VERDICTS.good };
+    return { ...DEAL_VERDICTS.good };
   }
 
   if (historicalDiscount !== null && historicalDiscount <= thresholds.expensiveHistoricalDiscountPercent) {
-    return { ...VERDICTS.expensive };
+    return { ...DEAL_VERDICTS.expensive };
   }
-  return { ...VERDICTS.normal };
+  return { ...DEAL_VERDICTS.normal };
 }
+
+export function assessDiscountClaim({
+  observationsCount,
+  claimedDiscountPercent,
+  historicalDiscountPercent,
+}) {
+  const thresholds = PRICE_INTELLIGENCE_THRESHOLDS;
+  const claimedDiscount = finiteNumber(claimedDiscountPercent);
+  const historicalDiscount = finiteNumber(historicalDiscountPercent);
+  if (
+    historyConfidence(observationsCount) === "insufficient"
+    || claimedDiscount === null
+    || claimedDiscount <= thresholds.minimumMeaningfulClaimedDiscountPercent
+    || historicalDiscount === null
+  ) {
+    return { ...CLAIM_ASSESSMENTS.unknown };
+  }
+  if (
+    claimedDiscount >= thresholds.exaggeratedClaimedDiscountPercent
+    && claimedDiscount - Math.max(0, historicalDiscount) >= thresholds.exaggeratedClaimGapPoints
+  ) {
+    return { ...CLAIM_ASSESSMENTS.exaggerated };
+  }
+  return { ...CLAIM_ASSESSMENTS.representative };
+}
+
+/** @deprecated Use buildDealVerdict(). Retailer claim credibility is assessed separately. */
+export const priceVerdict = buildDealVerdict;
 
 export function buildPriceStats({
   history = [],
@@ -150,6 +220,7 @@ export function buildPriceStats({
   currentPriceCents,
   claimedOriginalPriceCents,
   claimedDiscountPercent,
+  now = new Date(),
 } = {}) {
   const observations = (Array.isArray(history) ? history : [])
     .filter((observation) => priceFrom(observation) !== null)
@@ -195,13 +266,19 @@ export function buildPriceStats({
     ? roundPercent(Math.max(0, ((currentPrice - lowest) / lowest) * 100))
     : null;
   const confidence = historyConfidence(observations.length);
-  const verdict = priceVerdict({
+  const freshness = historyFreshness(latestObservation?.observedAt, now);
+  const dealVerdict = buildDealVerdict({
     observationsCount: observations.length,
-    claimedDiscountPercent: claimedDiscount,
     historicalDiscountPercent: historicalDiscount,
     distanceFromLowestPercent: distanceFromLowest,
     currentPriceCents: currentPrice,
     previousLowestPriceCents: previousLowest,
+    freshness,
+  });
+  const claimAssessment = assessDiscountClaim({
+    observationsCount: observations.length,
+    claimedDiscountPercent: claimedDiscount,
+    historicalDiscountPercent: historicalDiscount,
   });
 
   return {
@@ -219,7 +296,11 @@ export function buildPriceStats({
     differenceFromAveragePercent: differenceFromAverage,
     distanceFromLowestPercent: distanceFromLowest,
     confidence,
-    verdict,
+    dealVerdict,
+    claimAssessment,
+    freshness,
+    // Deprecated compatibility alias. All deal-quality logic lives in buildDealVerdict().
+    verdict: dealVerdict,
     firstObservedAt: observedAt(observations[0]) || null,
     lastObservedAt: observedAt(latestObservation) || null,
   };

@@ -20,6 +20,7 @@ import {
   Trophy,
   X,
 } from "lucide-react";
+import { ProductIntelligenceModal } from "./components/ProductIntelligenceModal";
 
 type Deal = {
   key: string;
@@ -123,7 +124,7 @@ function ResilientImage({
 
 function DealImage({ deal, onOpen, eager = false }: { deal: Deal; onOpen: () => void; eager?: boolean }) {
   return (
-    <button className="product-image" onClick={onOpen} aria-label={`Agrandir l’image de ${deal.name}`}>
+    <button className="product-image" onClick={onOpen} aria-label={`Voir l’analyse PrixRadar de ${deal.name}`}>
       <ResilientImage
         key={`${deal.imageProxyUrl}|${deal.imageUrl}`}
         product={deal}
@@ -329,7 +330,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="eyebrow"><Trophy size={16} /> Palmarès automatique multi-marchés</p>
           <h1>Les vraies bonnes affaires,<br /><em>classées pour vous.</em></h1>
-          <p>PrixRadar analyse les promotions de 7 enseignes marocaines et fait remonter les offres qui combinent vraie remise, économie importante et disponibilité.</p>
+          <p>PrixRadar analyse les promotions de 7 enseignes marocaines et fait remonter les offres qui combinent remise affichée, économie importante et disponibilité.</p>
           <div className="hero-actions">
             <a href="#classement" className="primary-action">Explorer le classement <ChevronRight size={18} /></a>
             <button className="refresh-button" onClick={refresh} disabled={refreshing}>
@@ -341,7 +342,7 @@ export default function Home() {
           <div className="score-orbit"><span>94</span><small>Score deal</small></div>
           <div><p>Notre score transparent</p><h2>4 signaux, un classement</h2></div>
           <ul>
-            <li><span>50%</span> Remise réelle</li>
+            <li><span>50%</span> Remise affichée</li>
             <li><span>24%</span> Économie en MAD</li>
             <li><span>18%</span> Produit en stock</li>
             <li><span>8%</span> Fraîcheur du relevé</li>
@@ -415,21 +416,21 @@ export default function Home() {
           </div>
         )}
 
-        <div className="method-note"><Info size={18} /><p><b>Comment lire le score ?</b> Une forte remise ne suffit pas. PrixRadar valorise aussi l’économie réelle, la disponibilité et la fraîcheur du relevé. Les remises supérieures à 90%, les prix nuls et les incohérences sont automatiquement écartés.</p></div>
+        <div className="method-note"><Info size={18} /><p><b>Comment lire le score ?</b> Une forte remise ne suffit pas. Le score actuel valorise la remise affichée, l’économie en MAD, la disponibilité et la fraîcheur du relevé. Les remises supérieures à 90%, les prix nuls et les incohérences sont automatiquement écartés.</p></div>
       </section>
 
       <footer><div className="brand"><span className="brand-mark"><Radar size={20} /></span><span>PrixRadar <b>Maroc</b></span></div><p>Comparateur local indépendant · Les prix peuvent évoluer sur le site marchand.</p></footer>
 
       {selected && (
-        <div className="modal-backdrop" onMouseDown={() => setSelected(null)}>
-          <div className="image-modal" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={selected.name}>
-            <button className="modal-close" onClick={() => setSelected(null)} title="Fermer"><X size={20} /></button>
-            <div className="modal-image">
-              <ResilientImage key={`${selected.imageProxyUrl}|${selected.imageUrl}`} product={selected} alt={selected.name} loading="eager" fallbackSize={50} />
-            </div>
-            <div className="modal-copy"><span>{selected.site} · {selected.category}</span><h3>{selected.name}</h3><div><b>{money.format(selected.priceCents / 100)}</b><del>{money.format(selected.originalPriceCents / 100)}</del><em>−{Math.round(selected.discountPercent)}%</em></div><a href={selected.productUrl} target="_blank" rel="noreferrer">Voir l’offre chez {selected.site} <ExternalLink size={16} /></a></div>
-          </div>
-        </div>
+        <ProductIntelligenceModal
+          key={`${selected.site}|${selected.productUrl}`}
+          deal={selected}
+          onClose={() => setSelected(null)}
+          onCompare={selected.merchantCount > 1 ? () => {
+            setComparing(selected);
+            setSelected(null);
+          } : undefined}
+        />
       )}
       {comparing && <ComparisonModal deal={comparing} onClose={() => setComparing(null)} />}
     </main>

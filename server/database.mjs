@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { loadHistoricalStatsBatch } from "./historical-stats.mjs";
 import { buildPriceStats, normalizeHistoryWindowDays } from "./price-intelligence.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -263,6 +264,10 @@ export function getDatabaseStats() {
     FROM product_daily_history
   `).get();
   return { ...current, ...history, databasePath };
+}
+
+export function getActiveProductPriceStats({ days = 90, now = new Date() } = {}) {
+  return loadHistoricalStatsBatch(database, { days, now });
 }
 
 function resolveProductKey({ productKey: key, site, productUrl }) {

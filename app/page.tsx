@@ -31,8 +31,9 @@ type Deal = {
   name: string;
   category: string;
   priceCents: number;
-  originalPriceCents: number;
+  originalPriceCents: number | null;
   savingsCents: number;
+  historicalSavingsCents: number;
   discountPercent: number;
   availability: "in_stock" | "out_of_stock" | "unknown";
   productUrl: string;
@@ -40,6 +41,29 @@ type Deal = {
   imageProxyUrl: string | null;
   score: number;
   quality: string;
+  rankingMode: "historical" | "retailer_fallback";
+  ranking: {
+    score: number;
+    mode: "historical" | "retailer_fallback";
+    components: {
+      historicalValue: number;
+      proximityToLow: number;
+      historicalSavings: number;
+      availability: number;
+      freshness: number;
+      confidence: number;
+      advertisedValue: number;
+      advertisedSavings: number;
+      suspiciousClaimPenalty: number;
+    };
+    eligibility: { isDeal: boolean; reason: string };
+  };
+  historicalStats: {
+    medianPriceCents: number | null;
+    historicalDiscountPercent: number | null;
+    distanceFromLowestPercent: number | null;
+    confidence: "insufficient" | "medium" | "high";
+  } | null;
   merchantCount: number;
   bestPriceCents: number;
   comparisons: ComparisonOffer[];
@@ -67,7 +91,17 @@ type DealsResponse = {
   page: number;
   totalPages: number;
   options: { sites: string[]; categories: string[] };
-  stats: { analyzed: number; inStock: number; stores: number; maxSavings: number; updatedAt: number };
+  stats: {
+    analyzed: number;
+    eligible: number;
+    historicalRanked: number;
+    fallbackRanked: number;
+    inStock: number;
+    stores: number;
+    maxSavings: number;
+    maxHistoricalSavings: number;
+    updatedAt: number;
+  };
   warnings: string[];
 };
 
@@ -77,7 +111,17 @@ const emptyData: DealsResponse = {
   page: 1,
   totalPages: 1,
   options: { sites: [], categories: [] },
-  stats: { analyzed: 0, inStock: 0, stores: 0, maxSavings: 0, updatedAt: 0 },
+  stats: {
+    analyzed: 0,
+    eligible: 0,
+    historicalRanked: 0,
+    fallbackRanked: 0,
+    inStock: 0,
+    stores: 0,
+    maxSavings: 0,
+    maxHistoricalSavings: 0,
+    updatedAt: 0,
+  },
   warnings: [],
 };
 
@@ -137,12 +181,22 @@ function DealImage({ deal, onOpen, eager = false }: { deal: Deal; onOpen: () => 
 }
 
 function DealCard({ deal, featured = false, onOpen, onCompare }: { deal: Deal; featured?: boolean; onOpen: () => void; onCompare: () => void }) {
+  const historicalDiscount = deal.historicalStats?.historicalDiscountPercent;
+  const hasAdvertisedDiscount = deal.originalPriceCents !== null && deal.discountPercent > 0;
+  const hasHistoricalDiscount = historicalDiscount !== null
+    && historicalDiscount !== undefined
+    && historicalDiscount > 0;
+  const usesHistoricalSavings = deal.rankingMode === "historical" && deal.historicalSavingsCents > 0;
   return (
     <article className={`deal-card ${featured ? "featured" : ""}`}>
       <div className="image-wrap">
         <DealImage deal={deal} onOpen={onOpen} eager={featured} />
         <span className="rank-badge">#{deal.rank}</span>
-        <span className="discount-badge">−{Math.round(deal.discountPercent)}%</span>
+        {hasAdvertisedDiscount ? (
+          <span className="discount-badge">−{Math.round(deal.discountPercent)}% affiché</span>
+        ) : hasHistoricalDiscount ? (
+          <span className="discount-badge historical">−{Math.round(historicalDiscount)}% historique</span>
+        ) : null}
       </div>
       <div className="deal-body">
         <div className="deal-meta">
@@ -152,13 +206,25 @@ function DealCard({ deal, featured = false, onOpen, onCompare }: { deal: Deal; f
         <button className="deal-title" onClick={onOpen}>{deal.name}</button>
         <span className="category-label">{deal.category || "Autres"}</span>
         <div className="price-row">
-          <div><strong>{money.format(deal.priceCents / 100)}</strong><del>{money.format(deal.originalPriceCents / 100)}</del></div>
-          <div className="score-chip" title="Score calculé selon la remise, l’économie, le stock et la fraîcheur">
+          <div>
+            <strong>{money.format(deal.priceCents / 100)}</strong>
+            {deal.originalPriceCents !== null && <del>{money.format(deal.originalPriceCents / 100)}</del>}
+          </div>
+          <div
+            className="score-chip"
+            title={deal.rankingMode === "historical"
+              ? "Score calculé selon le prix historique, le plus bas observé, l’économie, le stock, la fraîcheur et la confiance"
+              : "Score temporaire fondé sur la promotion affichée pendant la constitution de l’historique"}
+          >
             <b>{deal.score}</b><span>/100</span>
           </div>
         </div>
         <div className="saving-row">
-          <span><Sparkles size={15} /> Vous économisez <b>{money.format(deal.savingsCents / 100)}</b></span>
+          <span>
+            <Sparkles size={15} />
+            {usesHistoricalSavings ? "Sous le prix habituel" : "Économie affichée"}
+            <b>{money.format((usesHistoricalSavings ? deal.historicalSavingsCents : deal.savingsCents) / 100)}</b>
+          </span>
           <span className={`stock ${deal.availability}`}>
             {deal.availability === "in_stock" ? <><CircleCheck size={14} /> En stock</> : "Rupture"}
           </span>
@@ -170,7 +236,12 @@ function DealCard({ deal, featured = false, onOpen, onCompare }: { deal: Deal; f
           </button>
         )}
         <div className="card-footer">
-          <span className={`quality q-${deal.quality.toLowerCase().replace(" ", "-")}`}>{deal.quality}</span>
+          <div className="card-labels">
+            <span className={`quality q-${deal.quality.toLowerCase().replace(" ", "-")}`}>{deal.quality}</span>
+            <span className={`ranking-mode ${deal.rankingMode}`}>
+              {deal.rankingMode === "historical" ? "Analyse historique" : "Historique en cours"}
+            </span>
+          </div>
           <a href={deal.productUrl} target="_blank" rel="noreferrer">Voir l’offre <ExternalLink size={15} /></a>
         </div>
       </div>
@@ -330,7 +401,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="eyebrow"><Trophy size={16} /> Palmarès automatique multi-marchés</p>
           <h1>Les vraies bonnes affaires,<br /><em>classées pour vous.</em></h1>
-          <p>PrixRadar analyse les promotions de 7 enseignes marocaines et fait remonter les offres qui combinent remise affichée, économie importante et disponibilité.</p>
+          <p>PrixRadar compare les prix de 7 enseignes marocaines à leur historique et fait remonter les offres réellement attractives, même sans promotion affichée.</p>
           <div className="hero-actions">
             <a href="#classement" className="primary-action">Explorer le classement <ChevronRight size={18} /></a>
             <button className="refresh-button" onClick={refresh} disabled={refreshing}>
@@ -340,21 +411,23 @@ export default function Home() {
         </div>
         <aside className="score-explainer">
           <div className="score-orbit"><span>94</span><small>Score deal</small></div>
-          <div><p>Notre score transparent</p><h2>4 signaux, un classement</h2></div>
+          <div><p>Notre score transparent</p><h2>6 signaux historiques</h2></div>
           <ul>
-            <li><span>50%</span> Remise affichée</li>
-            <li><span>24%</span> Économie en MAD</li>
-            <li><span>18%</span> Produit en stock</li>
-            <li><span>8%</span> Fraîcheur du relevé</li>
+            <li><span>40%</span> Écart au prix habituel</li>
+            <li><span>20%</span> Proximité du plus bas</li>
+            <li><span>15%</span> Économie historique</li>
+            <li><span>10%</span> Disponibilité</li>
+            <li><span>10%</span> Fraîcheur</li>
+            <li><span>5%</span> Confiance historique</li>
           </ul>
         </aside>
       </header>
 
       <section className="stats-strip">
-        <div><Tags size={19} /><span><b>{number.format(data.stats.analyzed)}</b> promotions analysées</span></div>
+        <div><Tags size={19} /><span><b>{number.format(data.stats.analyzed)}</b> prix analysés</span></div>
         <div><CircleCheck size={19} /><span><b>{number.format(data.stats.inStock)}</b> offres en stock</span></div>
         <div><Store size={19} /><span><b>{data.stats.stores}</b> enseignes comparées</span></div>
-        <div><Sparkles size={19} /><span>Jusqu’à <b>{money.format(data.stats.maxSavings / 100)}</b> d’économie</span></div>
+        <div><Sparkles size={19} /><span>Jusqu’à <b>{money.format((data.stats.maxHistoricalSavings || data.stats.maxSavings) / 100)}</b> sous le prix de référence</span></div>
       </section>
 
       <section className="workspace" id="classement" ref={rankingRef}>
@@ -381,8 +454,8 @@ export default function Home() {
             <label><span>Enseigne</span><select value={site} onChange={(event) => changeFilter(setSite, event.target.value)}><option value="all">Toutes les enseignes</option>{data.options.sites.map((value) => <option key={value}>{value}</option>)}</select></label>
             <label><span>Catégorie</span><select value={category} onChange={(event) => changeFilter(setCategory, event.target.value)}><option value="all">Toutes les catégories</option>{data.options.categories.map((value) => <option key={value}>{value}</option>)}</select></label>
             <label><span>Disponibilité</span><select value={availability} onChange={(event) => changeFilter(setAvailability, event.target.value)}><option value="in_stock">En stock seulement</option><option value="all">Tous les produits</option><option value="out_of_stock">En rupture</option></select></label>
-            <label><span>Remise minimum</span><select value={minDiscount} onChange={(event) => changeFilter(setMinDiscount, event.target.value)}><option value="0">Toutes les remises</option><option value="10">10% et plus</option><option value="20">20% et plus</option><option value="30">30% et plus</option><option value="40">40% et plus</option></select></label>
-            <label><span>Trier par</span><select value={sort} onChange={(event) => changeFilter(setSort, event.target.value)}><option value="score_desc">Meilleur score</option><option value="discount_desc">Plus forte remise</option><option value="savings_desc">Plus grande économie</option><option value="price_asc">Prix le plus bas</option></select></label>
+            <label><span>Remise affichée minimum</span><select value={minDiscount} onChange={(event) => changeFilter(setMinDiscount, event.target.value)}><option value="0">Toutes les remises affichées</option><option value="10">10% et plus</option><option value="20">20% et plus</option><option value="30">30% et plus</option><option value="40">40% et plus</option></select></label>
+            <label><span>Trier par</span><select value={sort} onChange={(event) => changeFilter(setSort, event.target.value)}><option value="score_desc">Meilleur score PrixRadar</option><option value="discount_desc">Plus forte remise affichée</option><option value="savings_desc">Plus grande économie affichée</option><option value="price_asc">Prix le plus bas</option></select></label>
           </div>
         </div>
 
@@ -416,7 +489,7 @@ export default function Home() {
           </div>
         )}
 
-        <div className="method-note"><Info size={18} /><p><b>Comment lire le score ?</b> Une forte remise ne suffit pas. Le score actuel valorise la remise affichée, l’économie en MAD, la disponibilité et la fraîcheur du relevé. Les remises supérieures à 90%, les prix nuls et les incohérences sont automatiquement écartés.</p></div>
+        <div className="method-note"><Info size={18} /><p><b>Comment lire le score ?</b> Avec un historique suffisant, PrixRadar mesure le prix actuel face à la médiane observée, au plus bas historique, à l’économie en MAD, au stock, à la fraîcheur et au niveau de confiance. Pour un nouveau produit, un score temporaire plafonné peut utiliser la promotion affichée et porte la mention « Historique en cours ».</p></div>
       </section>
 
       <footer><div className="brand"><span className="brand-mark"><Radar size={20} /></span><span>PrixRadar <b>Maroc</b></span></div><p>Comparateur local indépendant · Les prix peuvent évoluer sur le site marchand.</p></footer>

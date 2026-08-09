@@ -9,8 +9,10 @@ export const PRICE_INTELLIGENCE_THRESHOLDS = Object.freeze({
   exaggeratedClaimGapPoints: 10,
   exceptionalHistoricalDiscountPercent: 15,
   exceptionalLowestDistancePercent: 1,
+  minimumExceptionalLowestDiscountPercent: 3,
   goodHistoricalDiscountPercent: 7,
   goodLowestDistancePercent: 5,
+  minimumGoodLowestDiscountPercent: 1,
   expensiveHistoricalDiscountPercent: -5,
 });
 
@@ -156,7 +158,7 @@ export function buildDealVerdict({
   const currentPrice = integerPrice(currentPriceCents);
   const previousLowest = integerPrice(previousLowestPriceCents);
   const isMeaningfullyAtLowest = historicalDiscount !== null
-    && historicalDiscount > 0
+    && historicalDiscount >= thresholds.minimumExceptionalLowestDiscountPercent
     && distanceFromLowest !== null
     && distanceFromLowest <= thresholds.exceptionalLowestDistancePercent
     && previousLowest !== null
@@ -170,7 +172,7 @@ export function buildDealVerdict({
   }
 
   const isNearLowest = historicalDiscount !== null
-    && historicalDiscount > 0
+    && historicalDiscount >= thresholds.minimumGoodLowestDiscountPercent
     && distanceFromLowest !== null
     && distanceFromLowest <= thresholds.goodLowestDistancePercent;
   if (
@@ -214,6 +216,86 @@ export function assessDiscountClaim({
 /** @deprecated Use buildDealVerdict(). Retailer claim credibility is assessed separately. */
 export const priceVerdict = buildDealVerdict;
 
+export function buildPriceStatsFromAggregates({
+  windowDays = DEFAULT_HISTORY_WINDOW_DAYS,
+  observationsCount = 0,
+  currentPriceCents,
+  medianPriceCents,
+  averagePriceCents,
+  lowestPriceCents,
+  highestPriceCents,
+  previousLowestPriceCents,
+  claimedOriginalPriceCents,
+  claimedDiscountPercent,
+  firstObservedAt = null,
+  lastObservedAt = null,
+  freshnessObservedAt = lastObservedAt,
+  now = new Date(),
+} = {}) {
+  const count = Math.max(0, Math.floor(finiteNumber(observationsCount) || 0));
+  const currentPrice = integerPrice(currentPriceCents);
+  const median = integerPrice(medianPriceCents);
+  const average = integerPrice(averagePriceCents);
+  const lowest = integerPrice(lowestPriceCents);
+  const highest = integerPrice(highestPriceCents);
+  const previousLowest = integerPrice(previousLowestPriceCents);
+  const originalPrice = integerPrice(claimedOriginalPriceCents);
+  let claimedDiscount = finiteNumber(claimedDiscountPercent);
+  if (claimedDiscount === null && originalPrice !== null && currentPrice !== null && originalPrice > 0) {
+    claimedDiscount = ((originalPrice - currentPrice) / originalPrice) * 100;
+  }
+  claimedDiscount = roundPercent(claimedDiscount);
+
+  const historicalDiscount = median !== null && currentPrice !== null
+    ? roundPercent(((median - currentPrice) / median) * 100)
+    : null;
+  const differenceFromAverage = average !== null && currentPrice !== null
+    ? roundPercent(((currentPrice - average) / average) * 100)
+    : null;
+  const distanceFromLowest = lowest !== null && currentPrice !== null
+    ? roundPercent(Math.max(0, ((currentPrice - lowest) / lowest) * 100))
+    : null;
+  const confidence = historyConfidence(count);
+  const freshness = historyFreshness(freshnessObservedAt, now);
+  const dealVerdict = buildDealVerdict({
+    observationsCount: count,
+    historicalDiscountPercent: historicalDiscount,
+    distanceFromLowestPercent: distanceFromLowest,
+    currentPriceCents: currentPrice,
+    previousLowestPriceCents: previousLowest,
+    freshness,
+  });
+  const claimAssessment = assessDiscountClaim({
+    observationsCount: count,
+    claimedDiscountPercent: claimedDiscount,
+    historicalDiscountPercent: historicalDiscount,
+  });
+
+  return {
+    windowDays: normalizeHistoryWindowDays(windowDays),
+    observationsCount: count,
+    currentPriceCents: currentPrice,
+    medianPriceCents: median,
+    averagePriceCents: average,
+    lowestPriceCents: lowest,
+    highestPriceCents: highest,
+    previousLowestPriceCents: previousLowest,
+    claimedOriginalPriceCents: originalPrice,
+    claimedDiscountPercent: claimedDiscount,
+    historicalDiscountPercent: historicalDiscount,
+    differenceFromAveragePercent: differenceFromAverage,
+    distanceFromLowestPercent: distanceFromLowest,
+    confidence,
+    dealVerdict,
+    claimAssessment,
+    freshness,
+    // Deprecated compatibility alias. All deal-quality logic lives in buildDealVerdict().
+    verdict: dealVerdict,
+    firstObservedAt: firstObservedAt || null,
+    lastObservedAt: lastObservedAt || null,
+  };
+}
+
 export function buildPriceStats({
   history = [],
   windowDays = DEFAULT_HISTORY_WINDOW_DAYS,
@@ -250,39 +332,8 @@ export function buildPriceStats({
   const claimedSource = claimedDiscountPercent === undefined
     ? latestObservation?.discountPercent
     : claimedDiscountPercent;
-  let claimedDiscount = finiteNumber(claimedSource);
-  if (claimedDiscount === null && originalPrice !== null && currentPrice !== null && originalPrice > 0) {
-    claimedDiscount = ((originalPrice - currentPrice) / originalPrice) * 100;
-  }
-  claimedDiscount = roundPercent(claimedDiscount);
-
-  const historicalDiscount = median !== null && currentPrice !== null
-    ? roundPercent(((median - currentPrice) / median) * 100)
-    : null;
-  const differenceFromAverage = average !== null && currentPrice !== null
-    ? roundPercent(((currentPrice - average) / average) * 100)
-    : null;
-  const distanceFromLowest = lowest !== null && currentPrice !== null
-    ? roundPercent(Math.max(0, ((currentPrice - lowest) / lowest) * 100))
-    : null;
-  const confidence = historyConfidence(observations.length);
-  const freshness = historyFreshness(latestObservation?.observedAt, now);
-  const dealVerdict = buildDealVerdict({
-    observationsCount: observations.length,
-    historicalDiscountPercent: historicalDiscount,
-    distanceFromLowestPercent: distanceFromLowest,
-    currentPriceCents: currentPrice,
-    previousLowestPriceCents: previousLowest,
-    freshness,
-  });
-  const claimAssessment = assessDiscountClaim({
-    observationsCount: observations.length,
-    claimedDiscountPercent: claimedDiscount,
-    historicalDiscountPercent: historicalDiscount,
-  });
-
-  return {
-    windowDays: normalizeHistoryWindowDays(windowDays),
+  return buildPriceStatsFromAggregates({
+    windowDays,
     observationsCount: observations.length,
     currentPriceCents: currentPrice,
     medianPriceCents: median,
@@ -291,17 +342,10 @@ export function buildPriceStats({
     highestPriceCents: highest,
     previousLowestPriceCents: previousLowest,
     claimedOriginalPriceCents: originalPrice,
-    claimedDiscountPercent: claimedDiscount,
-    historicalDiscountPercent: historicalDiscount,
-    differenceFromAveragePercent: differenceFromAverage,
-    distanceFromLowestPercent: distanceFromLowest,
-    confidence,
-    dealVerdict,
-    claimAssessment,
-    freshness,
-    // Deprecated compatibility alias. All deal-quality logic lives in buildDealVerdict().
-    verdict: dealVerdict,
+    claimedDiscountPercent: claimedSource,
     firstObservedAt: observedAt(observations[0]) || null,
     lastObservedAt: observedAt(latestObservation) || null,
-  };
+    freshnessObservedAt: latestObservation?.observedAt || null,
+    now,
+  });
 }

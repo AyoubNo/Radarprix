@@ -1,11 +1,17 @@
 import http from "node:http";
 import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from "./catalog-store.mjs";
 import {
+  getActiveProductPriceStats,
   getDatabaseStats,
   getProductHistory,
   getProductPriceStats,
   isDailyCollectionDue,
 } from "./database.mjs";
+import {
+  DEAL_RANKING_THRESHOLDS,
+  rankDeal,
+  rankingQuality,
+} from "./deal-ranking.mjs";
 
 const PORT = 3500;
 const DAILY_COLLECTION_CHECK_MS = 30 * 60 * 1000;
@@ -48,7 +54,15 @@ const PC_PRODUCT_PATTERNS = [
   /\b(clavier|keyboard|souris|mouse|webcam|routeur|router|imprimante|scanner|ssd|disque dur|memoire ram)\b/,
 ];
 
-let cache = { deals: [], rawDealCount: 0, fetchedAt: 0, warnings: [], loading: null };
+let cache = {
+  deals: [],
+  rawDealCount: 0,
+  evaluatedCount: 0,
+  rankingMetrics: null,
+  fetchedAt: 0,
+  warnings: [],
+  loading: null,
+};
 
 function json(response, status, payload) {
   response.writeHead(status, {
@@ -156,6 +170,7 @@ function toOffer(product, source) {
   const universe = classifyUniverse(product, source);
   return {
     key: `${source.key}-${product.site}-${product.id}`,
+    productKey: product.productKey || null,
     universe,
     universeLabel: getUniverseLabel(universe),
     site: product.site,
@@ -225,28 +240,19 @@ function attachComparisonsAndDedupe(deals, offers) {
   return grouped;
 }
 
-function scoreDeal(product, source) {
+function buildRankedDeal(product, source, historicalStats, now = new Date()) {
   const price = Number(product.priceCents);
-  const original = Number(product.originalPriceCents);
-  if (!Number.isFinite(price) || !Number.isFinite(original) || price <= 0 || original <= price) return null;
-
-  const savings = Math.max(0, original - price);
-  const calculatedDiscount = (savings / original) * 100;
-  const discount = Number.isFinite(Number(product.discountPercent))
-    ? Number(product.discountPercent)
-    : calculatedDiscount;
-  if (discount < 3 || discount > 90 || savings < 1000) return null;
-
-  const savingsMad = savings / 100;
-  const discountScore = Math.min(discount, 65) / 65 * 50;
-  const savingsScore = Math.min(1, Math.log10(1 + savingsMad) / 4) * 24;
-  const stockScore = product.availability === "in_stock" ? 18 : product.availability === "unknown" ? 5 : 0;
-  const scrapedTime = Date.parse(product.scrapedAt || "");
-  const ageDays = Number.isFinite(scrapedTime) ? (Date.now() - scrapedTime) / 86400000 : 99;
-  const freshnessScore = ageDays <= 2 ? 8 : ageDays <= 7 ? 5 : 2;
-  const suspiciousPenalty = discount > 80 ? 12 : 0;
-  const score = Math.max(0, Math.min(100, Math.round(discountScore + savingsScore + stockScore + freshnessScore - suspiciousPenalty)));
-  const quality = score >= 85 ? "Exceptionnelle" : score >= 72 ? "Excellente" : score >= 60 ? "Très bonne" : "Bonne";
+  if (!Number.isFinite(price) || price <= 0 || !product.productUrl) return null;
+  const originalCandidate = Number(product.originalPriceCents);
+  const original = Number.isFinite(originalCandidate) && originalCandidate > price
+    ? originalCandidate
+    : null;
+  const savings = original === null ? 0 : original - price;
+  const explicitDiscount = Number(product.discountPercent);
+  const calculatedDiscount = original === null ? 0 : (savings / original) * 100;
+  const discount = Number.isFinite(explicitDiscount) ? Math.max(0, explicitDiscount) : calculatedDiscount;
+  const ranking = rankDeal({ product: { ...product, priceCents: price }, historicalStats, now });
+  if (!ranking.eligibility.isDeal) return null;
   const universe = classifyUniverse(product, source);
 
   return {
@@ -254,12 +260,18 @@ function scoreDeal(product, source) {
     key: `${source.key}-${product.site}-${product.id}`,
     universe,
     universeLabel: getUniverseLabel(universe),
-    score,
-    quality,
+    score: ranking.score,
+    quality: rankingQuality(ranking.score),
     priceCents: price,
     originalPriceCents: original,
     savingsCents: savings,
     discountPercent: Math.round(discount * 10) / 10,
+    historicalSavingsCents: ranking.historicalSavingsCents,
+    historicalStats,
+    ranking,
+    rankingMode: ranking.mode,
+    dealVerdict: historicalStats?.dealVerdict || null,
+    claimAssessment: historicalStats?.claimAssessment || null,
     imageProxyUrl: product.imageUrl
       ? `/api/image?source=${source.key}&url=${encodeURIComponent(product.imageUrl)}`
       : null,
@@ -270,7 +282,7 @@ async function fetchSource(source) {
   const snapshot = await readSnapshot(source.key);
   const products = snapshot.products;
   return {
-    deals: products.filter((product) => product.onSale).map((product) => scoreDeal(product, source)).filter(Boolean),
+    products,
     offers: products.map((product) => toOffer(product, source)).filter(Boolean),
     exportedAt: snapshot.exportedAt,
   };
@@ -293,24 +305,67 @@ async function refreshDeals(force = false) {
 
     const settled = await Promise.allSettled(SOURCES.map((source) => fetchSource(source)));
     const warnings = [...refreshWarnings];
-    const deals = [];
+    const sourceProducts = [];
     const offers = [];
     const snapshotTimes = [];
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
-        deals.push(...result.value.deals);
+        sourceProducts.push(...result.value.products.map((product) => ({
+          product,
+          source: SOURCES[index],
+        })));
         offers.push(...result.value.offers);
         const snapshotTime = Date.parse(result.value.exportedAt || "");
         if (Number.isFinite(snapshotTime)) snapshotTimes.push(snapshotTime);
       }
       else warnings.push(`${SOURCES[index].label} indisponible: ${result.reason?.message || "erreur inconnue"}`);
     });
+
+    let historyBatch = {
+      statsByProductKey: new Map(),
+      metrics: {
+        queryCount: 0,
+        productsAggregated: 0,
+        observationsRead: 0,
+        windowDays: DEAL_RANKING_THRESHOLDS.historicalWindowDays,
+        durationMs: 0,
+      },
+    };
+    try {
+      historyBatch = getActiveProductPriceStats({
+        days: DEAL_RANKING_THRESHOLDS.historicalWindowDays,
+      });
+    } catch (error) {
+      warnings.push(`Agrégation historique indisponible: ${error?.message || "erreur inconnue"}`);
+    }
+
+    const rankingNow = new Date();
+    const deals = sourceProducts
+      .map(({ product, source }) => buildRankedDeal(
+        product,
+        source,
+        historyBatch.statsByProductKey.get(product.productKey) || null,
+        rankingNow,
+      ))
+      .filter(Boolean);
     if (!deals.length && cache.deals.length) return { ...cache, warnings };
-    deals.sort((a, b) => b.score - a.score || b.savingsCents - a.savingsCents || b.discountPercent - a.discountPercent);
+    deals.sort((a, b) => (
+      b.score - a.score
+      || b.historicalSavingsCents - a.historicalSavingsCents
+      || b.savingsCents - a.savingsCents
+      || b.discountPercent - a.discountPercent
+    ));
     const groupedDeals = attachComparisonsAndDedupe(deals, offers);
+    const rankingMetrics = {
+      ...historyBatch.metrics,
+      historicalDeals: deals.filter((deal) => deal.rankingMode === "historical").length,
+      fallbackDeals: deals.filter((deal) => deal.rankingMode === "retailer_fallback").length,
+    };
     cache = {
       deals: groupedDeals,
       rawDealCount: deals.length,
+      evaluatedCount: sourceProducts.length,
+      rankingMetrics,
       fetchedAt: snapshotTimes.length ? Math.max(...snapshotTimes) : Date.now(),
       warnings: [...new Set(warnings)],
       loading: null,
@@ -368,7 +423,11 @@ function sortDeals(deals, sort) {
   if (sort === "discount_desc") sorted.sort((a, b) => b.discountPercent - a.discountPercent || b.score - a.score);
   else if (sort === "savings_desc") sorted.sort((a, b) => b.savingsCents - a.savingsCents || b.score - a.score);
   else if (sort === "price_asc") sorted.sort((a, b) => a.priceCents - b.priceCents);
-  else sorted.sort((a, b) => b.score - a.score || b.savingsCents - a.savingsCents);
+  else sorted.sort((a, b) => (
+    b.score - a.score
+    || b.historicalSavingsCents - a.historicalSavingsCents
+    || b.savingsCents - a.savingsCents
+  ));
   return sorted;
 }
 
@@ -421,6 +480,29 @@ const server = http.createServer(async (request, response) => {
         sources: SOURCES,
         collection: getCollectionProgress(),
         database: getDatabaseStats(),
+        ranking: cache.rankingMetrics,
+      });
+    }
+    if (request.method === "GET" && url.pathname === "/api/stats") {
+      const state = await getDealsForRequest();
+      const sites = [...new Set(state.deals.flatMap((deal) => [deal.site, ...deal.comparisons.map((offer) => offer.site)]))];
+      return json(response, 200, {
+        analyzed: state.evaluatedCount || state.rawDealCount || state.deals.length,
+        eligible: state.rawDealCount || state.deals.length,
+        rankedDeals: state.deals.length,
+        historicalRanked: state.rankingMetrics?.historicalDeals || 0,
+        fallbackRanked: state.rankingMetrics?.fallbackDeals || 0,
+        inStock: state.deals.filter((deal) => deal.availability === "in_stock").length,
+        stores: sites.length,
+        maxSavings: state.deals.reduce((max, deal) => Math.max(max, deal.savingsCents), 0),
+        maxHistoricalSavings: state.deals.reduce(
+          (max, deal) => Math.max(max, deal.historicalSavingsCents),
+          0,
+        ),
+        updatedAt: state.fetchedAt,
+        historyAggregation: state.rankingMetrics,
+        database: getDatabaseStats(),
+        warnings: state.warnings,
       });
     }
     if (request.method === "GET" && url.pathname === "/api/history") {
@@ -455,13 +537,28 @@ const server = http.createServer(async (request, response) => {
       const categories = [...new Set(state.deals.map((deal) => deal.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
       const inStock = state.deals.filter((deal) => deal.availability === "in_stock").length;
       const maxSavings = state.deals.reduce((max, deal) => Math.max(max, deal.savingsCents), 0);
+      const maxHistoricalSavings = state.deals.reduce(
+        (max, deal) => Math.max(max, deal.historicalSavingsCents),
+        0,
+      );
       return json(response, 200, {
         deals: sorted.slice(start, start + limit).map((deal, index) => ({ ...deal, rank: start + index + 1 })),
         total: sorted.length,
         page,
         totalPages: Math.max(1, Math.ceil(sorted.length / limit)),
         options: { sites, categories },
-        stats: { analyzed: state.rawDealCount || state.deals.length, inStock, stores: sites.length, maxSavings, updatedAt: state.fetchedAt },
+        stats: {
+          analyzed: state.evaluatedCount || state.rawDealCount || state.deals.length,
+          eligible: state.rawDealCount || state.deals.length,
+          historicalRanked: state.rankingMetrics?.historicalDeals || 0,
+          fallbackRanked: state.rankingMetrics?.fallbackDeals || 0,
+          historyAggregation: state.rankingMetrics,
+          inStock,
+          stores: sites.length,
+          maxSavings,
+          maxHistoricalSavings,
+          updatedAt: state.fetchedAt,
+        },
         warnings: state.warnings,
       });
     }

@@ -23,14 +23,19 @@ test("renders the PrixRadar ranking page", async () => {
   assert.match(html, /classement/i);
 });
 
-test("keeps the ranking formula explicit and filters invalid promotions", async () => {
+test("uses cached batch history and the dedicated ranking engine", async () => {
   const api = await readFile(new URL("../server/api-server.mjs", import.meta.url), "utf8");
-  assert.match(api, /discountScore/);
-  assert.match(api, /savingsScore/);
-  assert.match(api, /stockScore/);
-  assert.match(api, /freshnessScore/);
-  assert.match(api, /discount > 90/);
-  assert.match(api, /price <= 0/);
+  const ranking = await readFile(new URL("../server/deal-ranking.mjs", import.meta.url), "utf8");
+  const historicalStats = await readFile(new URL("../server/historical-stats.mjs", import.meta.url), "utf8");
+
+  assert.match(api, /getActiveProductPriceStats/);
+  assert.match(api, /buildRankedDeal/);
+  assert.doesNotMatch(api, /products\.filter\(\(product\) => product\.onSale\)/);
+  assert.match(ranking, /HISTORICAL_RANKING_WEIGHTS/);
+  assert.match(ranking, /retailer_fallback/);
+  assert.match(ranking, /fallbackScoreCap/);
+  assert.match(historicalStats, /ROW_NUMBER\(\) OVER/);
+  assert.match(historicalStats, /HISTORICAL_STATS_BATCH_QUERY_COUNT = 1/);
 });
 
 test("groups duplicate products and exposes multi-store comparisons", async () => {

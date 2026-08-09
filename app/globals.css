@@ -108,6 +108,7 @@ button { cursor: pointer; }
 .rank-badge, .discount-badge { position: absolute; top: 12px; z-index: 2; font-weight: 850; }
 .rank-badge { left: 12px; min-width: 34px; height: 30px; padding: 0 8px; border-radius: 8px; display: grid; place-items: center; color: #fff; background: var(--navy); font-size: 13px; }
 .discount-badge { right: 12px; padding: 7px 10px; border-radius: 8px; color: #9f2f00; background: #ffe0cf; font-size: 13px; }
+.discount-badge.historical { color: #2449b5; background: #e9efff; }
 .deal-body { padding: 16px; }
 .deal-meta { display: flex; justify-content: space-between; gap: 10px; color: #778092; font-size: 11px; font-weight: 700; }
 .universe-dot { display: inline-flex; align-items: center; gap: 5px; }
@@ -132,7 +133,11 @@ button { cursor: pointer; }
 .multi-store-button:hover { border-color: #9eb0f5; background: #e9efff; }
 .card-footer { margin-top: 15px; padding-top: 13px; border-top: 1px solid #edf0f4; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .card-footer a { color: var(--blue); text-decoration: none; font-weight: 800; font-size: 12px; display: inline-flex; align-items: center; gap: 5px; }
+.card-labels { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .quality { padding: 5px 7px; border-radius: 6px; background: #edf1f7; color: #536074; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.ranking-mode { padding: 5px 7px; border-radius: 6px; font-size: 9px; font-weight: 800; white-space: nowrap; }
+.ranking-mode.historical { color: #2449b5; background: #e9efff; }
+.ranking-mode.retailer_fallback { color: #6d5a33; background: #f5efe1; }
 .q-exceptionnelle { background: #fff0cd; color: #8b5d00; }
 .q-excellente { background: #e6f8f0; color: #087455; }
 

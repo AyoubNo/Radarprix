@@ -1,8 +1,14 @@
-const DEFAULT_SITE_ORIGIN = "http://localhost:3220";
+import { resolveSiteOrigin } from "./runtime-config.mjs";
+
 const MAX_SLUG_LENGTH = 80;
-const CONFIGURED_SITE_ORIGIN = process.env.PRIXRADAR_SITE_URL
-  || process.env.NEXT_PUBLIC_SITE_URL
-  || DEFAULT_SITE_ORIGIN;
+const configuredProductionFlag = process.env.PRIXRADAR_RUNTIME_PRODUCTION;
+const bundledSiteEnvironment = {
+  NODE_ENV: configuredProductionFlag === undefined
+    ? process.env.NODE_ENV
+    : configuredProductionFlag === "true" ? "production" : "development",
+  PRIXRADAR_SITE_URL: process.env.PRIXRADAR_SITE_URL,
+  NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL,
+};
 
 function finiteNumber(value) {
   const number = Number(value);
@@ -59,16 +65,7 @@ export function productPath(logicalProductId, name) {
 }
 
 export function siteOrigin(environment) {
-  const candidate = environment
-    ? environment.PRIXRADAR_SITE_URL || environment.NEXT_PUBLIC_SITE_URL || DEFAULT_SITE_ORIGIN
-    : CONFIGURED_SITE_ORIGIN;
-  try {
-    const url = new URL(candidate);
-    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported protocol");
-    return url.origin;
-  } catch {
-    return DEFAULT_SITE_ORIGIN;
-  }
+  return resolveSiteOrigin(environment || bundledSiteEnvironment);
 }
 
 export function absoluteProductUrl(detail, origin = siteOrigin()) {

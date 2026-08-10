@@ -2,6 +2,7 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
+import { validateWebRuntimeConfig } from "./server/runtime-config.mjs";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -42,19 +43,21 @@ export default defineConfig(async () => {
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
-  const apiInternalUrl = process.env.PRIXRADAR_API_INTERNAL_URL || "http://127.0.0.1:3500";
-  const sitePublicUrl = process.env.PRIXRADAR_SITE_URL
-    || process.env.NEXT_PUBLIC_SITE_URL
-    || "http://localhost:3220";
+  const runtime = validateWebRuntimeConfig(process.env);
+  const manualRefreshEnabled = !runtime.production
+    && process.env.NEXT_PUBLIC_PRIXRADAR_ENABLE_MANUAL_REFRESH !== "false";
 
   return {
     define: {
-      "process.env.PRIXRADAR_API_INTERNAL_URL": JSON.stringify(apiInternalUrl),
-      "process.env.PRIXRADAR_SITE_URL": JSON.stringify(sitePublicUrl),
-      "process.env.NEXT_PUBLIC_SITE_URL": JSON.stringify(sitePublicUrl),
+      "process.env.PRIXRADAR_API_INTERNAL_URL": JSON.stringify(runtime.internalApiOrigin),
+      "process.env.PRIXRADAR_SITE_URL": JSON.stringify(runtime.siteOrigin),
+      "process.env.NEXT_PUBLIC_SITE_URL": JSON.stringify(runtime.siteOrigin),
+      "process.env.NEXT_PUBLIC_PRIXRADAR_API_URL": JSON.stringify(runtime.publicApiOrigin),
+      "process.env.NEXT_PUBLIC_PRIXRADAR_ENABLE_MANUAL_REFRESH": JSON.stringify(String(manualRefreshEnabled)),
+      "process.env.PRIXRADAR_RUNTIME_PRODUCTION": JSON.stringify(String(runtime.production)),
     },
     server: {
-      proxy: { "/api": apiInternalUrl },
+      proxy: { "/api": runtime.internalApiOrigin },
       hmr: false,
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }

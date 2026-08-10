@@ -8,8 +8,15 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node node_modules/vinext/dist/cli.js build",
-    "start": "node scripts/dev.mjs",
+    "start": "npm run start:api",
+    "start:api": "node --no-warnings server/api-server.mjs",
+    "start:web": "node scripts/start-web.mjs",
+    "start:production": "node scripts/start-production.mjs",
+    "refresh": "node --no-warnings scripts/refresh-production.mjs",
     "snapshot": "node --no-warnings scripts/export-snapshots.mjs",
+    "db:backup": "node --no-warnings scripts/backup-database.mjs",
+    "validate:local": "node --no-warnings scripts/validate-local-runtime.mjs",
+    "validate:production": "node --no-warnings scripts/validate-production-runtime.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
@@ -17,7 +24,7 @@
   "dependencies": {
     "drizzle-orm": "0.45.2",
     "lucide-react": "^0.468.0",
-    "next": "16.2.6",
+    "next": "16.3.0",
     "puppeteer-core": "^24.16.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"

@@ -1,23 +1,28 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { crawlHomeSources } from "./collectors/home.mjs";
 import { crawlPcSources } from "./collectors/pc.mjs";
 import {
   countProducts,
   finishCollectionRun,
+  getLastCollectionSummary,
   getUniverseUpdatedAt,
   listProducts,
   startCollectionRun,
   syncUniverse,
 } from "./database.mjs";
+import { tryAcquireCollectionLock } from "./collection-lock.mjs";
+import { resolveDataPaths } from "./runtime-config.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dataDirectory = path.join(root, "data");
+const { dataDirectory, bundledSnapshotDirectory } = resolveDataPaths();
 const snapshotFiles = {
   pc: path.join(dataDirectory, "pc-products.json"),
   home: path.join(dataDirectory, "home-products.json"),
+};
+const bundledSnapshotFiles = {
+  pc: path.join(bundledSnapshotDirectory, "pc-products.json"),
+  home: path.join(bundledSnapshotDirectory, "home-products.json"),
 };
 const collectionReportFile = path.join(dataDirectory, "derniere-collecte.txt");
 
@@ -125,8 +130,16 @@ function normalizeProduct(product, site, universe, previous) {
 
 export async function readSnapshot(universe) {
   if (countProducts(universe) === 0) {
-    const file = snapshotFiles[universe];
-    const snapshot = JSON.parse(await readFile(file, "utf8"));
+    let snapshot;
+    for (const file of [...new Set([snapshotFiles[universe], bundledSnapshotFiles[universe]])]) {
+      try {
+        snapshot = JSON.parse(await readFile(file, "utf8"));
+        break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
+    if (!snapshot) throw new Error(`No bootstrap snapshot is available for ${universe}`);
     const products = Array.isArray(snapshot.products) ? snapshot.products : [];
     if (products.length) {
       syncUniverse(universe, products, {
@@ -214,10 +227,41 @@ async function writeCollectionReport({
 }
 
 let activeRefresh = null;
-let collectionProgress = { running: false, startedAt: null, sites: {} };
+const storedCollectionState = getLastCollectionSummary();
+let collectionProgress = {
+  running: false,
+  status: "idle",
+  startedAt: storedCollectionState.startedAt,
+  finishedAt: storedCollectionState.finishedAt,
+  lastSuccessfulAt: storedCollectionState.lastSuccessfulAt,
+  lastFailedAt: storedCollectionState.lastFailedAt,
+  storesSucceeded: storedCollectionState.storesSucceeded,
+  storesFailed: storedCollectionState.storesFailed,
+  sites: {},
+};
+
+function logCollection(event, fields = {}) {
+  console.log(JSON.stringify({ scope: "collection", event, timestamp: new Date().toISOString(), ...fields }));
+}
 
 export function getCollectionProgress() {
   return collectionProgress;
+}
+
+export function getPublicCollectionState() {
+  return {
+    status: collectionProgress.running ? "running" : "idle",
+    startedAt: collectionProgress.startedAt || null,
+    finishedAt: collectionProgress.finishedAt || null,
+    lastSuccessfulAt: collectionProgress.lastSuccessfulAt || null,
+    lastFailedAt: collectionProgress.lastFailedAt || null,
+    storesSucceeded: Number(collectionProgress.storesSucceeded || 0),
+    storesFailed: Number(collectionProgress.storesFailed || 0),
+  };
+}
+
+export function waitForActiveRefresh() {
+  return activeRefresh || Promise.resolve(null);
 }
 
 async function refreshUniverse(universe, crawl) {
@@ -237,6 +281,7 @@ async function refreshUniverse(universe, crawl) {
   for (const result of results) {
     const site = result.source.site;
     if (!result.ok) {
+      logCollection("store_failed", { site });
       warnings.push(`${site}: ${result.error}; anciennes données conservées`);
       continue;
     }
@@ -247,9 +292,11 @@ async function refreshUniverse(universe, crawl) {
       .map((product) => normalizeProduct(product, site, universe, previousByUrl.get(product.productUrl)))
       .filter(Boolean);
     if (!normalized.length) {
+      logCollection("store_failed", { site, reason: "empty_result" });
       warnings.push(`${site}: résultat vide; anciennes données conservées`);
       continue;
     }
+    logCollection("store_succeeded", { site, productsObserved: normalized.length });
     currentBySite.set(site, normalized);
     observedSites.push(site);
   }
@@ -261,10 +308,25 @@ async function refreshUniverse(universe, crawl) {
   return { universe, products, exportedAt: snapshot.exportedAt, results, warnings, observedSites };
 }
 
-export function refreshIntegratedCatalog() {
-  if (activeRefresh) return activeRefresh;
-  collectionProgress = { running: true, startedAt: new Date().toISOString(), sites: {} };
+export function beginIntegratedCatalogRefresh() {
+  if (activeRefresh) return { status: "already_running", completion: activeRefresh };
+  const lock = tryAcquireCollectionLock();
+  if (!lock.acquired) {
+    logCollection("skipped_already_running");
+    return { status: "already_running", completion: null };
+  }
+  collectionProgress = {
+    ...collectionProgress,
+    running: true,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    storesSucceeded: 0,
+    storesFailed: 0,
+    sites: {},
+  };
   const run = startCollectionRun();
+  logCollection("started", { runId: run.id });
   activeRefresh = (async () => {
     try {
       const pc = await refreshUniverse("pc", crawlPcSources);
@@ -276,6 +338,8 @@ export function refreshIntegratedCatalog() {
         .reduce((total, result) => total + result.products.length, 0);
       const status = warnings.length ? "partial" : "done";
       const finishedAt = new Date().toISOString();
+      const storesSucceeded = results.filter((result) => result.ok).length;
+      const storesFailed = results.length - storesSucceeded;
       await writeCollectionReport({
         startedAt: collectionProgress.startedAt,
         finishedAt,
@@ -289,13 +353,20 @@ export function refreshIntegratedCatalog() {
         productsObserved,
         warnings,
         sites: collectionProgress.sites,
+        storesSucceeded,
+        storesFailed,
       });
       collectionProgress = {
         ...collectionProgress,
         running: false,
+        status: "idle",
         finishedAt,
+        lastSuccessfulAt: finishedAt,
+        storesSucceeded,
+        storesFailed,
         warnings,
       };
+      logCollection("completed", { runId: run.id, status, productsObserved, storesSucceeded, storesFailed });
       return { snapshots: { pc, home }, warnings };
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -319,17 +390,31 @@ export function refreshIntegratedCatalog() {
       finishCollectionRun(run.id, "error", {
         error: message,
         sites: collectionProgress.sites,
+        storesSucceeded: siteResults.filter((state) => state.status === "done").length,
+        storesFailed: siteResults.filter((state) => state.status === "error").length,
       });
       collectionProgress = {
         ...collectionProgress,
         running: false,
+        status: "idle",
         finishedAt,
+        lastFailedAt: finishedAt,
+        storesSucceeded: siteResults.filter((state) => state.status === "done").length,
+        storesFailed: siteResults.filter((state) => state.status === "error").length,
         error: message,
       };
+      logCollection("failed", { runId: run.id });
       throw error;
     }
   })().finally(() => {
     activeRefresh = null;
+    lock.release();
   });
-  return activeRefresh;
+  return { status: "started", completion: activeRefresh };
+}
+
+export function refreshIntegratedCatalog() {
+  const result = beginIntegratedCatalogRefresh();
+  if (result.completion) return result.completion;
+  return Promise.resolve({ status: "already_running", snapshots: null, warnings: [] });
 }

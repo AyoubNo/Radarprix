@@ -1,17 +1,24 @@
 services:
-  radarprix:
+  api:
     build:
       context: .
-    image: radarprix-local
-    container_name: radarprix
+    image: radarprix-api
+    container_name: radarprix-api
     init: true
     restart: unless-stopped
     environment:
-      PRIXRADAR_HOST: 0.0.0.0
+      NODE_ENV: production
+      PRIXRADAR_SITE_URL: ${PRIXRADAR_SITE_URL:?Set PRIXRADAR_SITE_URL}
+      PRIXRADAR_REFRESH_SECRET: ${PRIXRADAR_REFRESH_SECRET:?Set PRIXRADAR_REFRESH_SECRET}
+      PRIXRADAR_DATA_DIR: /data
+      PRIXRADAR_API_HOST: 0.0.0.0
+      PRIXRADAR_API_PORT: 3500
+      PRIXRADAR_STARTUP_COLLECTION: "true"
+      CHROMIUM_PATH: /usr/bin/chromium
     ports:
-      - "3220:3220"
+      - "3500:3500"
     volumes:
-      - ./data:/app/data
+      - radarprix-data:/data
     healthcheck:
       test:
         - CMD
@@ -22,3 +29,6 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+
+volumes:
+  radarprix-data:

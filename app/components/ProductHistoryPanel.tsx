@@ -5,6 +5,7 @@ import { AlertTriangle, LoaderCircle, TrendingDown } from "lucide-react";
 import { PriceHistoryChart } from "./ProductIntelligenceModal";
 import type { ProductDetail } from "./product-detail-types";
 import styles from "./ProductHistoryPanel.module.css";
+import { publicApiUrl } from "../api-client";
 
 type HistoryPeriod = 30 | 90 | 180 | 365;
 
@@ -32,7 +33,7 @@ export function ProductHistoryPanel({ product }: { product: ProductDetail }) {
     setPeriod(days);
     setLoading(true);
     setError("");
-    fetch(`/api/product/${encodeURIComponent(product.id)}?days=${days}`, { signal: controller.signal })
+    fetch(publicApiUrl(`/api/product/${encodeURIComponent(product.id)}?days=${days}`), { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Historique indisponible (${response.status})`);
         return response.json() as Promise<ProductDetail>;

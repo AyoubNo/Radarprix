@@ -4,5 +4,9 @@
 dist
 node_modules
 npm-debug.log*
+.env*
+!.env.example
 data/*.sqlite.db
 data/*.sqlite.db-*
+data/backups
+data/collector.lock

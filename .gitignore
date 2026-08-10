@@ -30,6 +30,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -49,3 +50,5 @@ tsconfig.tsbuildinfo
 /data/radarprix.sqlite.db
 /data/radarprix.sqlite.db-shm
 /data/radarprix.sqlite.db-wal
+/data/backups/
+/data/collector.lock

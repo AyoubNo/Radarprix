@@ -29,6 +29,7 @@ import {
   historicalDifferenceText,
 } from "./price-intelligence-helpers.mjs";
 import styles from "./ProductIntelligenceModal.module.css";
+import { publicApiUrl } from "../api-client";
 
 export type PriceHistoryObservation = {
   observedDate: string;
@@ -367,7 +368,7 @@ export function ProductIntelligenceModal({
       productUrl: deal.productUrl,
       days: String(period),
     });
-    fetch(`/api/history?${params}`, { signal: controller.signal })
+    fetch(publicApiUrl(`/api/history?${params}`), { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Historique indisponible (${response.status})`);
         return response.json() as Promise<PriceHistoryResponse>;

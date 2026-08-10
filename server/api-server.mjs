@@ -1,8 +1,20 @@
 import http from "node:http";
-import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from "./catalog-store.mjs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
+  beginIntegratedCatalogRefresh,
+  getCollectionProgress,
+  getPublicCollectionState,
+  readSnapshot,
+  refreshIntegratedCatalog,
+  waitForActiveRefresh,
+} from "./catalog-store.mjs";
+import {
+  checkDatabase,
+  closeDatabase,
   getActiveProductPriceStats,
   getDatabaseStats,
+  getLastCollectionSummary,
   findLogicalProductId,
   getProductHistory,
   getProductPriceStats,
@@ -18,12 +30,13 @@ import {
   isSeoReadyProduct,
   productPath,
 } from "./product-seo.mjs";
+import { authorizeRefresh } from "./refresh-auth.mjs";
+import { corsHeaders, isCorsOriginAllowed, isLoopbackAddress } from "./http-security.mjs";
+import { getApiRuntimeConfig } from "./runtime-config.mjs";
 
-const configuredPort = Number(process.env.PRIXRADAR_API_PORT || 3500);
-const PORT = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65_535
-  ? configuredPort
-  : 3500;
 const DAILY_COLLECTION_CHECK_MS = 30 * 60 * 1000;
+const READ_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=120";
+const PRODUCT_CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=300";
 const SOURCES = [
   { key: "pc", label: "PC & Gaming" },
   { key: "home", label: "Maison & Électroménager" },
@@ -73,13 +86,14 @@ let cache = {
   fetchedAt: 0,
   warnings: [],
   loading: null,
+  collectionVersion: null,
 };
 
-function json(response, status, payload) {
+function json(response, status, payload, headers = {}) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
+    ...headers,
   });
   response.end(JSON.stringify(payload));
 }
@@ -399,6 +413,7 @@ async function refreshDeals(force = false) {
       fetchedAt: snapshotTimes.length ? Math.max(...snapshotTimes) : Date.now(),
       warnings: [...new Set(warnings)],
       loading: null,
+      collectionVersion: getLastCollectionSummary().finishedAt,
     };
     return cache;
   })();
@@ -412,6 +427,11 @@ async function refreshDeals(force = false) {
 
 async function getDealsForRequest() {
   if (!cache.deals.length) return refreshDeals(false);
+  const latestCollectionVersion = getLastCollectionSummary().finishedAt;
+  if (latestCollectionVersion && latestCollectionVersion !== cache.collectionVersion) {
+    invalidateDealCache();
+    return refreshDeals(false);
+  }
   return cache;
 }
 
@@ -534,15 +554,15 @@ function sortDeals(deals, sort) {
   return sorted;
 }
 
-async function proxyImage(url, response) {
+async function proxyImage(url, response, sendJson, responseHeaders = {}) {
   const sourceKey = url.searchParams.get("source");
   const imageUrl = url.searchParams.get("url");
   const source = SOURCES.find((item) => item.key === sourceKey);
-  if (!source || !imageUrl || !/^https?:\/\//i.test(imageUrl)) return json(response, 400, { error: "Image invalide" });
+  if (!source || !imageUrl || !/^https?:\/\//i.test(imageUrl)) return sendJson(400, { error: "Image invalide" });
   const parsed = new URL(imageUrl);
   const allowedHosts = IMAGE_HOSTS[source.key] || [];
   const allowed = allowedHosts.some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`));
-  if (!allowed) return json(response, 403, { error: "Domaine d'image non autorisé" });
+  if (!allowed) return sendJson(403, { error: "Domaine d'image non autorisé" });
 
   const upstream = await fetch(parsed, {
     redirect: "follow",
@@ -553,7 +573,7 @@ async function proxyImage(url, response) {
     },
     signal: AbortSignal.timeout(20000),
   });
-  if (!upstream.ok || !upstream.body) return json(response, upstream.status || 502, { error: "Image indisponible" });
+  if (!upstream.ok || !upstream.body) return sendJson(upstream.status || 502, { error: "Image indisponible" });
   const upstreamType = upstream.headers.get("content-type") || "";
   const pathname = parsed.pathname.toLowerCase();
   const inferredType = pathname.endsWith(".webp") ? "image/webp"
@@ -563,33 +583,92 @@ async function proxyImage(url, response) {
   response.writeHead(200, {
     "content-type": upstreamType.startsWith("image/") ? upstreamType : inferredType,
     "cache-control": "public, max-age=86400",
+    ...responseHeaders,
   });
   for await (const chunk of upstream.body) response.write(chunk);
   response.end();
 }
 
-const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+function invalidateDealCache() {
+  cache = {
+    deals: [],
+    productGroups: [],
+    rawDealCount: 0,
+    evaluatedCount: 0,
+    rankingMetrics: null,
+    productGroupsById: new Map(),
+    fetchedAt: 0,
+    warnings: [],
+    loading: null,
+    collectionVersion: null,
+  };
+}
+
+function reloadCacheAfterCollection(completion) {
+  if (!completion) return;
+  void Promise.resolve(completion)
+    .then(() => {
+      invalidateDealCache();
+      return refreshDeals(false);
+    })
+    .catch(() => {
+      // The collector logs details. Existing database rows remain available.
+    });
+}
+
+export function createPrixRadarServer(options = {}) {
+  const config = options.config || getApiRuntimeConfig();
+  const beginCollection = options.beginCollection || beginIntegratedCatalogRefresh;
+  const databaseCheck = options.checkDatabase || checkDatabase;
+  const collectionState = options.getCollectionState || getPublicCollectionState;
+  return http.createServer(async (request, response) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+    const cors = corsHeaders(request.headers.origin, config);
+    const sendJson = (status, payload, { cacheControl = "no-store" } = {}) => json(
+      response,
+      status,
+      payload,
+      { ...cors, "cache-control": cacheControl },
+    );
   try {
     if (request.method === "OPTIONS") {
-      response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS" });
+      if (!isCorsOriginAllowed(request.headers.origin, config)) return sendJson(403, { error: "Origin not allowed" });
+      response.writeHead(204, {
+        ...cors,
+        "access-control-allow-methods": "GET,POST,OPTIONS",
+        "access-control-allow-headers": "Authorization,Content-Type",
+        "access-control-max-age": "600",
+      });
       return response.end();
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return json(response, 200, {
-        ok: true,
-        cachedDeals: cache.deals.length,
-        fetchedAt: cache.fetchedAt || null,
-        sources: SOURCES,
-        collection: getCollectionProgress(),
-        database: getDatabaseStats(),
-        ranking: cache.rankingMetrics,
-      });
+      try {
+        databaseCheck();
+        const state = collectionState();
+        return sendJson(200, {
+          status: "ok",
+          database: "ok",
+          lastCollectionAt: state.lastSuccessfulAt,
+          collectionStatus: state.status,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.error(JSON.stringify({ scope: "api", event: "health_failed", message: error?.message || String(error) }));
+        return sendJson(503, {
+          status: "unhealthy",
+          database: "unavailable",
+          collectionStatus: "unknown",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/api/refresh-status") {
+      return sendJson(200, collectionState(), { cacheControl: "public, max-age=15" });
     }
     if (request.method === "GET" && url.pathname === "/api/stats") {
       const state = await getDealsForRequest();
       const sites = [...new Set(state.deals.flatMap((deal) => [deal.site, ...deal.comparisons.map((offer) => offer.site)]))];
-      return json(response, 200, {
+      return sendJson(200, {
         analyzed: state.evaluatedCount || state.rawDealCount || state.deals.length,
         eligible: state.rawDealCount || state.deals.length,
         rankedDeals: state.deals.length,
@@ -606,7 +685,7 @@ const server = http.createServer(async (request, response) => {
         historyAggregation: state.rankingMetrics,
         database: getDatabaseStats(),
         warnings: state.warnings,
-      });
+      }, { cacheControl: READ_CACHE_CONTROL });
     }
     if (request.method === "GET" && url.pathname === "/api/product-index") {
       const state = await getDealsForRequest();
@@ -628,15 +707,15 @@ const server = http.createServer(async (request, response) => {
           };
         })
         .filter(Boolean);
-      return json(response, 200, { products, total: products.length, updatedAt: state.fetchedAt });
+      return sendJson(200, { products, total: products.length, updatedAt: state.fetchedAt }, { cacheControl: PRODUCT_CACHE_CONTROL });
     }
     const productRoute = request.method === "GET"
       ? url.pathname.match(/^\/api\/product\/([a-zA-Z0-9]+)$/)
       : null;
     if (productRoute) {
       const detail = await getProductDetail(productRoute[1], { days: url.searchParams.get("days") || 90 });
-      if (!detail) return json(response, 404, { error: "Produit introuvable" });
-      return json(response, 200, detail);
+      if (!detail) return sendJson(404, { error: "Produit introuvable" });
+      return sendJson(200, detail, { cacheControl: PRODUCT_CACHE_CONTROL });
     }
     if (request.method === "GET" && url.pathname === "/api/history") {
       const lookup = {
@@ -650,14 +729,29 @@ const server = http.createServer(async (request, response) => {
         limit: url.searchParams.get("limit"),
         days,
       });
-      if (!result) return json(response, 404, { error: "Produit introuvable" });
+      if (!result) return sendJson(404, { error: "Produit introuvable" });
       const stats = getProductPriceStats({ ...lookup, days });
-      return json(response, 200, { product: result.product, stats, history: result.history });
+      return sendJson(200, { product: result.product, stats, history: result.history }, { cacheControl: PRODUCT_CACHE_CONTROL });
     }
-    if (request.method === "GET" && url.pathname === "/api/image") return await proxyImage(url, response);
+    if (request.method === "GET" && url.pathname === "/api/image") return await proxyImage(url, response, sendJson, cors);
+    if (request.method === "POST" && url.pathname === "/api/admin/refresh") {
+      const authorization = authorizeRefresh(request.headers.authorization, config.refreshSecret);
+      if (!authorization.ok) return sendJson(authorization.status, { error: authorization.error });
+      const started = beginCollection();
+      if (started.status === "already_running") {
+        return sendJson(409, { status: "already_running", collection: collectionState() });
+      }
+      reloadCacheAfterCollection(started.completion);
+      return sendJson(202, { status: "started", collection: collectionState() });
+    }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
-      const result = await refreshDeals(true);
-      return json(response, 200, { ok: true, total: result.deals.length, fetchedAt: result.fetchedAt, warnings: result.warnings });
+      const developmentHostIsLocal = ["127.0.0.1", "::1", "localhost"].includes(config.host);
+      if (config.production || !developmentHostIsLocal) return sendJson(404, { error: "Route introuvable" });
+      if (!isLoopbackAddress(request.socket.remoteAddress)) return sendJson(403, { error: "Local access only" });
+      const started = beginCollection();
+      if (started.status === "already_running") return sendJson(409, { status: "already_running" });
+      reloadCacheAfterCollection(started.completion);
+      return sendJson(202, { status: "started" });
     }
     if (request.method === "GET" && url.pathname === "/api/deals") {
       const state = await getDealsForRequest();
@@ -674,7 +768,7 @@ const server = http.createServer(async (request, response) => {
         (max, deal) => Math.max(max, deal.historicalSavingsCents),
         0,
       );
-      return json(response, 200, {
+      return sendJson(200, {
         deals: sorted.slice(start, start + limit).map((deal, index) => ({ ...deal, rank: start + index + 1 })),
         total: sorted.length,
         page,
@@ -693,21 +787,77 @@ const server = http.createServer(async (request, response) => {
           updatedAt: state.fetchedAt,
         },
         warnings: state.warnings,
-      });
+      }, { cacheControl: READ_CACHE_CONTROL });
     }
-    return json(response, 404, { error: "Route introuvable" });
+    return sendJson(404, { error: "Route introuvable" });
   } catch (error) {
-    console.error(error);
-    return json(response, 500, { error: error?.message || "Erreur serveur" });
+    console.error(JSON.stringify({
+      scope: "api",
+      event: "request_failed",
+      method: request.method,
+      path: url.pathname,
+      message: error?.message || String(error),
+    }));
+    return sendJson(500, { error: "Erreur serveur" });
   }
-});
-
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`PrixRadar API: http://127.0.0.1:${PORT}`);
-  void refreshDeals(false).then(runDailyCollectionIfNeeded).catch((error) => {
-    console.error("Initialisation PrixRadar échouée:", error);
   });
-  setInterval(() => {
-    void runDailyCollectionIfNeeded();
-  }, DAILY_COLLECTION_CHECK_MS).unref();
-});
+}
+
+export async function startPrixRadarApi(options = {}) {
+  const config = options.config || getApiRuntimeConfig();
+  const server = createPrixRadarServer({ ...options, config });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(config.port, config.host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  console.log(JSON.stringify({ scope: "api", event: "started", host: config.host, port: config.port }));
+  console.log(JSON.stringify({ scope: "database", event: "ready" }));
+
+  void refreshDeals(false)
+    .then(() => (config.startupCollection ? runDailyCollectionIfNeeded() : null))
+    .catch((error) => console.error(JSON.stringify({ scope: "api", event: "initialization_failed", message: error?.message || String(error) })));
+  const dailyTimer = config.startupCollection
+    ? setInterval(() => void runDailyCollectionIfNeeded(), DAILY_COLLECTION_CHECK_MS)
+    : null;
+  dailyTimer?.unref();
+
+  let shuttingDown = false;
+  async function shutdown(signal = "manual") {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(JSON.stringify({ scope: "api", event: "shutdown_started", signal }));
+    if (dailyTimer) clearInterval(dailyTimer);
+    server.closeIdleConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    let collectionFinished = false;
+    await Promise.race([
+      waitForActiveRefresh().finally(() => { collectionFinished = true; }),
+      new Promise((resolve) => setTimeout(resolve, config.shutdownGraceMs)),
+    ]);
+    if (collectionFinished || !getCollectionProgress().running) closeDatabase();
+    console.log(JSON.stringify({ scope: "api", event: "shutdown_completed", collectionFinished }));
+  }
+  return { server, config, shutdown };
+}
+
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
+if (invokedPath === import.meta.url) {
+  let runtime;
+  try {
+    runtime = await startPrixRadarApi();
+  } catch (error) {
+    console.error(`PrixRadar API startup failed: ${error?.message || String(error)}`);
+    process.exitCode = 1;
+  }
+  if (runtime) {
+    const stop = async (signal) => {
+      await runtime.shutdown(signal);
+      process.exit(0);
+    };
+    process.once("SIGTERM", () => void stop("SIGTERM"));
+    process.once("SIGINT", () => void stop("SIGINT"));
+  }
+}

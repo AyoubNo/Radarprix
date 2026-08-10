@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { ProductIntelligenceModal } from "./components/ProductIntelligenceModal";
+import { publicApiUrl } from "./api-client";
 
 type Deal = {
   key: string;
@@ -129,6 +130,8 @@ const emptyData: DealsResponse = {
 
 const money = new Intl.NumberFormat("fr-MA", { style: "currency", currency: "MAD", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("fr-MA");
+const manualRefreshEnabled = process.env.NODE_ENV !== "production"
+  && process.env.NEXT_PUBLIC_PRIXRADAR_ENABLE_MANUAL_REFRESH !== "false";
 
 function ResilientImage({
   product,
@@ -319,7 +322,7 @@ export default function Home() {
     else setLoading(true);
     const [minPrice, maxPrice] = budget.split(":");
     const params = new URLSearchParams({ q: query, universe, site, category, availability, minPrice, maxPrice, minDiscount, sort, page: String(page), limit: "24" });
-    fetch(`/api/deals?${params}`, { signal: controller.signal })
+    fetch(publicApiUrl(`/api/deals?${params}`), { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Erreur ${response.status}`);
         return response.json();
@@ -379,7 +382,7 @@ export default function Home() {
     setRefreshing(true);
     setError("");
     try {
-      const response = await fetch("/api/refresh", { method: "POST" });
+      const response = await fetch(publicApiUrl("/api/refresh"), { method: "POST" });
       if (!response.ok) throw new Error(`Erreur ${response.status}`);
       setReloadKey((value) => value + 1);
     } catch (reason) {
@@ -409,9 +412,11 @@ export default function Home() {
           <p>PrixRadar compare les prix de 7 enseignes marocaines à leur historique et fait remonter les offres réellement attractives, même sans promotion affichée.</p>
           <div className="hero-actions">
             <a href="#classement" className="primary-action">Explorer le classement <ChevronRight size={18} /></a>
-            <button className="refresh-button" onClick={refresh} disabled={refreshing}>
-              <RefreshCw size={17} className={refreshing ? "spin" : ""} /> {refreshing ? "Analyse en cours…" : "Actualiser les données"}
-            </button>
+            {manualRefreshEnabled ? (
+              <button className="refresh-button" onClick={refresh} disabled={refreshing}>
+                <RefreshCw size={17} className={refreshing ? "spin" : ""} /> {refreshing ? "Analyse en cours…" : "Actualiser les données"}
+              </button>
+            ) : null}
           </div>
         </div>
         <aside className="score-explainer">

@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { loadHistoricalStatsBatch } from "./historical-stats.mjs";
 import {
   assignLogicalProductIds,
@@ -10,13 +9,13 @@ import {
   resolveLogicalProductId,
 } from "./logical-products.mjs";
 import { buildPriceStats, normalizeHistoryWindowDays } from "./price-intelligence.mjs";
+import { resolveDataPaths } from "./runtime-config.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dataDirectory = path.join(root, "data");
+const { dataDirectory, databasePath } = resolveDataPaths();
 mkdirSync(dataDirectory, { recursive: true });
 
-export const databasePath = path.join(dataDirectory, "radarprix.sqlite.db");
 const database = new DatabaseSync(databasePath);
+export { databasePath };
 
 database.exec(`
   PRAGMA journal_mode = WAL;
@@ -122,7 +121,7 @@ function productKey(universe, site, productUrl) {
   return `${universe}:${digest}`;
 }
 
-function dateInMorocco(isoValue) {
+export function dateInMorocco(isoValue) {
   const date = new Date(isoValue);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Africa/Casablanca",
@@ -142,7 +141,12 @@ export function isDailyCollectionDue(now = new Date()) {
     ORDER BY id DESC
     LIMIT 1
   `).get();
-  return !latest?.finishedAt || dateInMorocco(latest.finishedAt) !== dateInMorocco(now.toISOString());
+  return isDailyCollectionDueAt(latest?.finishedAt, now);
+}
+
+export function isDailyCollectionDueAt(lastSuccessfulAt, now = new Date()) {
+  if (!lastSuccessfulAt) return true;
+  return dateInMorocco(lastSuccessfulAt) !== dateInMorocco(now.toISOString());
 }
 
 export function countProducts(universe) {
@@ -257,7 +261,7 @@ export function finishCollectionRun(id, status, details = {}) {
   return { id, finishedAt, status };
 }
 
-export function getDatabaseStats() {
+export function getDatabaseStats({ includePath = false } = {}) {
   const current = database.prepare(`
     SELECT COUNT(*) AS products, COUNT(DISTINCT site) AS sites
     FROM products_current WHERE active = 1
@@ -269,7 +273,61 @@ export function getDatabaseStats() {
            MAX(observed_date) AS lastDate
     FROM product_daily_history
   `).get();
-  return { ...current, ...history, databasePath };
+  return { ...current, ...history, ...(includePath ? { databasePath } : {}) };
+}
+
+export function checkDatabase() {
+  database.prepare("SELECT 1 AS ok").get();
+  return true;
+}
+
+export function getLastCollectionSummary() {
+  const latest = database.prepare(`
+    SELECT started_at AS startedAt, finished_at AS finishedAt, status,
+           products_observed AS productsObserved, details_json AS detailsJson
+    FROM collection_runs
+    ORDER BY id DESC
+    LIMIT 1
+  `).get();
+  const lastSuccessful = database.prepare(`
+    SELECT finished_at AS finishedAt
+    FROM collection_runs
+    WHERE status IN ('done', 'partial') AND finished_at IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+  `).get();
+  const lastFailed = database.prepare(`
+    SELECT finished_at AS finishedAt
+    FROM collection_runs
+    WHERE status IN ('error', 'interrupted') AND finished_at IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+  `).get();
+  let details = {};
+  try { details = latest?.detailsJson ? JSON.parse(latest.detailsJson) : {}; } catch { /* ignore invalid legacy details */ }
+  return {
+    status: latest?.status || "never_run",
+    startedAt: latest?.startedAt || null,
+    finishedAt: latest?.finishedAt || null,
+    lastSuccessfulAt: lastSuccessful?.finishedAt || null,
+    lastFailedAt: lastFailed?.finishedAt || null,
+    productsObserved: Number(latest?.productsObserved || 0),
+    storesSucceeded: Number(details.storesSucceeded || 0),
+    storesFailed: Number(details.storesFailed || 0),
+  };
+}
+
+export async function backupDatabase(destinationPath) {
+  mkdirSync(path.dirname(destinationPath), { recursive: true });
+  await backup(database, destinationPath);
+  return destinationPath;
+}
+
+let databaseClosed = false;
+export function closeDatabase() {
+  if (databaseClosed) return;
+  databaseClosed = true;
+  database.close();
 }
 
 export function getActiveProductPriceStats({ days = 90, now = new Date() } = {}) {

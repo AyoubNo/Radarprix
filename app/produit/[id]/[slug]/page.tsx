@@ -23,7 +23,7 @@ import {
 import styles from "./ProductPage.module.css";
 import { ProductPageImage } from "./ProductPageImage";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 300;
 
 type PageProps = { params: Promise<{ id: string; slug: string }> };
 

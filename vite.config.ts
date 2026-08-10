@@ -42,10 +42,19 @@ export default defineConfig(async () => {
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
+  const apiInternalUrl = process.env.PRIXRADAR_API_INTERNAL_URL || "http://127.0.0.1:3500";
+  const sitePublicUrl = process.env.PRIXRADAR_SITE_URL
+    || process.env.NEXT_PUBLIC_SITE_URL
+    || "http://localhost:3220";
 
   return {
+    define: {
+      "process.env.PRIXRADAR_API_INTERNAL_URL": JSON.stringify(apiInternalUrl),
+      "process.env.PRIXRADAR_SITE_URL": JSON.stringify(sitePublicUrl),
+      "process.env.NEXT_PUBLIC_SITE_URL": JSON.stringify(sitePublicUrl),
+    },
     server: {
-      proxy: { "/api": "http://127.0.0.1:3500" },
+      proxy: { "/api": apiInternalUrl },
       hmr: false,
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }

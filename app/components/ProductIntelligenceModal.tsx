@@ -185,7 +185,7 @@ function chartDate(value: string) {
     : "—";
 }
 
-function PriceHistoryChart({
+export function PriceHistoryChart({
   history,
   medianPriceCents,
 }: {

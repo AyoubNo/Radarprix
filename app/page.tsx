@@ -24,6 +24,8 @@ import { ProductIntelligenceModal } from "./components/ProductIntelligenceModal"
 
 type Deal = {
   key: string;
+  logicalProductId: string;
+  productPath: string;
   rank: number;
   universe: "pc" | "home";
   universeLabel: string;
@@ -166,9 +168,9 @@ function ResilientImage({
   );
 }
 
-function DealImage({ deal, onOpen, eager = false }: { deal: Deal; onOpen: () => void; eager?: boolean }) {
+function DealImage({ deal, eager = false }: { deal: Deal; eager?: boolean }) {
   return (
-    <button className="product-image" onClick={onOpen} aria-label={`Voir l’analyse PrixRadar de ${deal.name}`}>
+    <a className="product-image" href={deal.productPath} aria-label={`Voir la page prix et historique de ${deal.name}`}>
       <ResilientImage
         key={`${deal.imageProxyUrl}|${deal.imageUrl}`}
         product={deal}
@@ -176,7 +178,7 @@ function DealImage({ deal, onOpen, eager = false }: { deal: Deal; onOpen: () => 
         loading={eager ? "eager" : "lazy"}
         showFallbackLabel
       />
-    </button>
+    </a>
   );
 }
 
@@ -203,7 +205,7 @@ function DealCard({ deal, featured = false, onOpen, onCompare }: { deal: Deal; f
           <span className={`universe-dot ${deal.universe}`}>{deal.universeLabel}</span>
           <span>{deal.site}</span>
         </div>
-        <button className="deal-title" onClick={onOpen}>{deal.name}</button>
+        <a className="deal-title" href={deal.productPath}>{deal.name}</a>
         <span className="category-label">{deal.category || "Autres"}</span>
         <div className="price-row">
           <div>
@@ -242,7 +244,10 @@ function DealCard({ deal, featured = false, onOpen, onCompare }: { deal: Deal; f
               {deal.rankingMode === "historical" ? "Analyse historique" : "Historique en cours"}
             </span>
           </div>
-          <a href={deal.productUrl} target="_blank" rel="noreferrer">Voir l’offre <ExternalLink size={15} /></a>
+          <div className="card-actions">
+            <button type="button" onClick={onOpen}>Analyse rapide</button>
+            <a href={deal.productUrl} target="_blank" rel="noreferrer">Voir l’offre <ExternalLink size={15} /></a>
+          </div>
         </div>
       </div>
     </article>

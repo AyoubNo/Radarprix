@@ -3,8 +3,10 @@ import { getCollectionProgress, readSnapshot, refreshIntegratedCatalog } from ".
 import {
   getActiveProductPriceStats,
   getDatabaseStats,
+  findLogicalProductId,
   getProductHistory,
   getProductPriceStats,
+  identifyLogicalProducts,
   isDailyCollectionDue,
 } from "./database.mjs";
 import {
@@ -12,8 +14,15 @@ import {
   rankDeal,
   rankingQuality,
 } from "./deal-ranking.mjs";
+import {
+  isSeoReadyProduct,
+  productPath,
+} from "./product-seo.mjs";
 
-const PORT = 3500;
+const configuredPort = Number(process.env.PRIXRADAR_API_PORT || 3500);
+const PORT = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65_535
+  ? configuredPort
+  : 3500;
 const DAILY_COLLECTION_CHECK_MS = 30 * 60 * 1000;
 const SOURCES = [
   { key: "pc", label: "PC & Gaming" },
@@ -56,9 +65,11 @@ const PC_PRODUCT_PATTERNS = [
 
 let cache = {
   deals: [],
+  productGroups: [],
   rawDealCount: 0,
   evaluatedCount: 0,
   rankingMetrics: null,
+  productGroupsById: new Map(),
   fetchedAt: 0,
   warnings: [],
   loading: null,
@@ -178,9 +189,13 @@ function toOffer(product, source) {
     category: product.category,
     priceCents: price,
     originalPriceCents: Number(product.originalPriceCents) || null,
+    discountPercent: Number(product.discountPercent) || 0,
+    onSale: Boolean(product.onSale),
     availability: product.availability,
     productUrl: product.productUrl,
     imageUrl: product.imageUrl || null,
+    scrapedAt: product.scrapedAt || null,
+    updatedAt: product.updatedAt || null,
     imageProxyUrl: product.imageUrl
       ? `/api/image?source=${source.key}&url=${encodeURIComponent(product.imageUrl)}`
       : null,
@@ -252,7 +267,6 @@ function buildRankedDeal(product, source, historicalStats, now = new Date()) {
   const calculatedDiscount = original === null ? 0 : (savings / original) * 100;
   const discount = Number.isFinite(explicitDiscount) ? Math.max(0, explicitDiscount) : calculatedDiscount;
   const ranking = rankDeal({ product: { ...product, priceCents: price }, historicalStats, now });
-  if (!ranking.eligibility.isDeal) return null;
   const universe = classifyUniverse(product, source);
 
   return {
@@ -340,7 +354,7 @@ async function refreshDeals(force = false) {
     }
 
     const rankingNow = new Date();
-    const deals = sourceProducts
+    const evaluatedProducts = sourceProducts
       .map(({ product, source }) => buildRankedDeal(
         product,
         source,
@@ -348,24 +362,40 @@ async function refreshDeals(force = false) {
         rankingNow,
       ))
       .filter(Boolean);
-    if (!deals.length && cache.deals.length) return { ...cache, warnings };
-    deals.sort((a, b) => (
+    const eligibleProducts = evaluatedProducts.filter((product) => product.ranking.eligibility.isDeal);
+    if (!eligibleProducts.length && cache.deals.length) return { ...cache, warnings };
+    evaluatedProducts.sort((a, b) => (
+      Number(b.ranking.eligibility.isDeal) - Number(a.ranking.eligibility.isDeal)
+      || b.score - a.score
+      || b.historicalSavingsCents - a.historicalSavingsCents
+      || b.savingsCents - a.savingsCents
+      || b.discountPercent - a.discountPercent
+    ));
+    const productGroups = identifyLogicalProducts(attachComparisonsAndDedupe(evaluatedProducts, offers))
+      .map((group) => ({
+        ...group,
+        productPath: productPath(group.logicalProductId, group.name),
+      }));
+    const groupedDeals = productGroups.filter((group) => group.ranking.eligibility.isDeal);
+    groupedDeals.sort((a, b) => (
       b.score - a.score
       || b.historicalSavingsCents - a.historicalSavingsCents
       || b.savingsCents - a.savingsCents
       || b.discountPercent - a.discountPercent
     ));
-    const groupedDeals = attachComparisonsAndDedupe(deals, offers);
+    const productGroupsById = new Map(productGroups.map((group) => [group.logicalProductId, group]));
     const rankingMetrics = {
       ...historyBatch.metrics,
-      historicalDeals: deals.filter((deal) => deal.rankingMode === "historical").length,
-      fallbackDeals: deals.filter((deal) => deal.rankingMode === "retailer_fallback").length,
+      historicalDeals: eligibleProducts.filter((deal) => deal.rankingMode === "historical").length,
+      fallbackDeals: eligibleProducts.filter((deal) => deal.rankingMode === "retailer_fallback").length,
     };
     cache = {
       deals: groupedDeals,
-      rawDealCount: deals.length,
+      productGroups,
+      rawDealCount: eligibleProducts.length,
       evaluatedCount: sourceProducts.length,
       rankingMetrics,
+      productGroupsById,
       fetchedAt: snapshotTimes.length ? Math.max(...snapshotTimes) : Date.now(),
       warnings: [...new Set(warnings)],
       loading: null,
@@ -383,6 +413,79 @@ async function refreshDeals(force = false) {
 async function getDealsForRequest() {
   if (!cache.deals.length) return refreshDeals(false);
   return cache;
+}
+
+function offerStockRank(offer) {
+  if (offer.availability === "in_stock") return 0;
+  if (offer.availability === "unknown") return 1;
+  return 2;
+}
+
+function detailOffers(group) {
+  const primary = {
+    key: group.key,
+    productKey: group.productKey,
+    site: group.site,
+    name: group.name,
+    priceCents: group.priceCents,
+    originalPriceCents: group.originalPriceCents,
+    discountPercent: group.discountPercent,
+    availability: group.availability,
+    productUrl: group.productUrl,
+    imageUrl: group.imageUrl,
+    imageProxyUrl: group.imageProxyUrl,
+    scrapedAt: group.scrapedAt,
+    updatedAt: group.updatedAt,
+  };
+  return [primary, ...group.comparisons]
+    .filter((offer) => offer.productKey && Number(offer.priceCents) > 0)
+    .sort((left, right) => offerStockRank(left) - offerStockRank(right) || left.priceCents - right.priceCents);
+}
+
+function buildProductDetail(group, { days = 90 } = {}) {
+  if (!group) return null;
+  const offers = detailOffers(group);
+  const bestOffer = offers.find((offer) => offer.availability === "in_stock") || offers[0];
+  if (!bestOffer) return null;
+  const historyResult = getProductHistory({ productKey: bestOffer.productKey, days, limit: 365 });
+  const stats = getProductPriceStats({ productKey: bestOffer.productKey, days });
+  if (!stats) return null;
+  const ranking = rankDeal({ product: bestOffer, historicalStats: stats });
+  const lastModified = offers
+    .map((offer) => Date.parse(offer.updatedAt || offer.scrapedAt || ""))
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  const detail = {
+    id: group.logicalProductId,
+    slug: productPath(group.logicalProductId, group.name).split("/").at(-1),
+    canonicalPath: productPath(group.logicalProductId, group.name),
+    name: group.name,
+    category: group.category,
+    universe: group.universe,
+    universeLabel: group.universeLabel,
+    imageUrl: bestOffer.imageUrl || group.imageUrl || null,
+    imageProxyUrl: bestOffer.imageProxyUrl || group.imageProxyUrl || null,
+    bestOffer,
+    offers,
+    stats,
+    history: historyResult?.history || [],
+    historySource: {
+      productKey: bestOffer.productKey,
+      site: bestOffer.site,
+    },
+    ranking,
+    dealVerdict: stats.dealVerdict,
+    claimAssessment: stats.claimAssessment,
+    lastModified: Number.isFinite(lastModified) ? new Date(lastModified).toISOString() : null,
+  };
+  return { ...detail, seoReady: isSeoReadyProduct(detail) };
+}
+
+async function getProductDetail(productId, options) {
+  const state = await getDealsForRequest();
+  const resolvedId = findLogicalProductId(productId);
+  if (!resolvedId) return null;
+  return buildProductDetail(state.productGroupsById.get(resolvedId), options);
 }
 
 async function runDailyCollectionIfNeeded() {
@@ -504,6 +607,36 @@ const server = http.createServer(async (request, response) => {
         database: getDatabaseStats(),
         warnings: state.warnings,
       });
+    }
+    if (request.method === "GET" && url.pathname === "/api/product-index") {
+      const state = await getDealsForRequest();
+      const products = state.productGroups
+        .map((group) => {
+          const summary = {
+            id: group.logicalProductId,
+            name: group.name,
+            offers: detailOffers(group),
+            stats: group.historicalStats,
+            ranking: group.ranking,
+          };
+          if (!isSeoReadyProduct(summary)) return null;
+          return {
+            id: group.logicalProductId,
+            slug: group.productPath.split("/").at(-1),
+            path: group.productPath,
+            lastModified: group.updatedAt || group.scrapedAt || null,
+          };
+        })
+        .filter(Boolean);
+      return json(response, 200, { products, total: products.length, updatedAt: state.fetchedAt });
+    }
+    const productRoute = request.method === "GET"
+      ? url.pathname.match(/^\/api\/product\/([a-zA-Z0-9]+)$/)
+      : null;
+    if (productRoute) {
+      const detail = await getProductDetail(productRoute[1], { days: url.searchParams.get("days") || 90 });
+      if (!detail) return json(response, 404, { error: "Produit introuvable" });
+      return json(response, 200, detail);
     }
     if (request.method === "GET" && url.pathname === "/api/history") {
       const lookup = {

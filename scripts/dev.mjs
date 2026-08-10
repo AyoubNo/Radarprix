@@ -3,6 +3,7 @@ import path from "node:path";
 
 const root = process.cwd();
 const hostname = process.env.PRIXRADAR_HOST || "localhost";
+const webPort = process.env.PRIXRADAR_WEB_PORT || "3220";
 const children = [
   spawn(process.execPath, ["--no-warnings", path.join(root, "server", "api-server.mjs")], {
     cwd: root,
@@ -15,7 +16,7 @@ const children = [
       path.join(root, "node_modules", "vinext", "dist", "cli.js"),
       "dev",
       "--port",
-      "3220",
+      webPort,
       "--hostname",
       hostname,
     ],

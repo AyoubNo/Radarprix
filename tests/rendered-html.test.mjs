@@ -103,3 +103,23 @@ test("returns to the ranking header after pagination", async () => {
   assert.match(page, /behavior: "smooth", block: "start"/);
   assert.doesNotMatch(page, /scrollTo\(\{ top: 560/);
 });
+
+test("exposes stable, crawlable product-page foundations", async () => {
+  const api = await readFile(new URL("../server/api-server.mjs", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/produit/[id]/[slug]/page.tsx", import.meta.url), "utf8");
+  const homepage = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const sitemap = await readFile(new URL("../app/sitemap.ts", import.meta.url), "utf8");
+
+  assert.match(api, /\/api\/product-index/);
+  assert.match(api, /\/api\\\/product\\\//);
+  assert.match(api, /identifyLogicalProducts/);
+  assert.match(page, /generateMetadata/);
+  assert.match(page, /application\/ld\+json/);
+  assert.match(page, /Prix habituel/);
+  assert.match(page, /Merchant|merchant-offers/i);
+  assert.match(page, /permanentRedirect/);
+  assert.match(homepage, /href=\{deal\.productPath\}/);
+  assert.match(homepage, /Analyse rapide/);
+  assert.match(sitemap, /50_000/);
+  assert.doesNotMatch(page, /useEffect|fetch\(`\/api\/product/);
+});

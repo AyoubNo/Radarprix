@@ -4,6 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { loadHistoricalStatsBatch } from "./historical-stats.mjs";
+import {
+  assignLogicalProductIds,
+  initializeLogicalProductSchema,
+  resolveLogicalProductId,
+} from "./logical-products.mjs";
 import { buildPriceStats, normalizeHistoryWindowDays } from "./price-intelligence.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -69,6 +74,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS product_daily_history_product_idx
     ON product_daily_history(product_key, observed_date DESC);
 `);
+initializeLogicalProductSchema(database);
 
 const markUniverseInactive = database.prepare(`
   UPDATE products_current SET active = 0 WHERE universe = ?
@@ -268,6 +274,14 @@ export function getDatabaseStats() {
 
 export function getActiveProductPriceStats({ days = 90, now = new Date() } = {}) {
   return loadHistoricalStatsBatch(database, { days, now });
+}
+
+export function identifyLogicalProducts(groups, options) {
+  return assignLogicalProductIds(database, groups, options);
+}
+
+export function findLogicalProductId(value) {
+  return resolveLogicalProductId(database, value);
 }
 
 function resolveProductKey({ productKey: key, site, productUrl }) {
